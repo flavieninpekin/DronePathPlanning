@@ -1,0 +1,32 @@
+{
+    "map": {
+        "mode": "generate",   
+        "config": {           
+            "dimension": 2,
+            "size": [100, 100],
+            "obstacle_density": 0.3,
+            "downsample": true,
+            "downsample_size": 10,
+            "random_seed": 42
+        },
+        "files": {          
+            "original": "map_original.npy",
+            "downsampled": "map_downsampled.npy"
+        }
+    },
+    "planning": {
+        "algorithm": "AStarRRT",
+        "start": [5, 5],
+        "goal": [95, 95],
+        "rrt_params": {
+            "max_iterations": 5000,
+            "step_size": 1.0,
+            "feasible_bias_prob": 0.8
+        }
+    },
+    "rl": {
+        "enabled": false,
+        "episodes": 1000,
+        "reference_path_weight": 0.1
+    }
+}
