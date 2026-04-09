@@ -22,8 +22,8 @@ DENSITIES = [0.2, 0.3, 0.6]
 NUM_TRIALS = 25
 RRT_STEP_SIZE = 1.5          # 步长
 RRT_MAX_ITER = 50000         # 最大迭代次数
-TASK_TIMEOUT = 180           # 每个任务超时（秒），RRT可能较慢
-NUM_WORKERS = min(12, mp.cpu_count())  # RRT 计算密集，适当减少并行数
+TASK_TIMEOUT = 300           # 每个任务超时（秒），RRT可能较慢
+NUM_WORKERS = min(16, mp.cpu_count())  # RRT 计算密集，适当减少并行数
 
 # 输出目录
 script_dir = Path(__file__).resolve().parent
