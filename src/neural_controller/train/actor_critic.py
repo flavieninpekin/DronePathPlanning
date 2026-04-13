@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,3 +29,25 @@ class Critic(nn.Module):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
         return self.value(x)
+
+
+def try_load_actor_checkpoint(actor: Actor, path: str, map_location=None) -> bool:
+    """Load actor weights only if the checkpoint matches the current observation size."""
+    if not os.path.isfile(path):
+        return False
+    state = torch.load(path, map_location=map_location)
+    w = state.get("fc1.weight")
+    if w is None:
+        print(f"Skip load {path}: checkpoint has no fc1.weight")
+        return False
+    if w.shape[1] != actor.fc1.in_features:
+        print(
+            f"Skip load {path}: checkpoint obs_dim={w.shape[1]}, "
+            f"current env obs_dim={actor.fc1.in_features}. "
+            "Align config (e.g. num_dynamic_obs) with the run that produced the checkpoint, "
+            "or remove the old file and retrain."
+        )
+        return False
+    actor.load_state_dict(state, strict=True)
+    print(f"Loaded existing model from {path}")
+    return True

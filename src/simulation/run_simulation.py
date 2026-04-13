@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(__file__))
 from neural_controller.env.drone_env import MultiDroneEnv
-from neural_controller.train.actor_critic import Actor
+from neural_controller.train.actor_critic import Actor, try_load_actor_checkpoint
 
 def main():
     config = {
@@ -21,18 +21,22 @@ def main():
     env = MultiDroneEnv(config)
     # 如果训练了模型，加载
     actor = Actor(env.obs_dim, env.action_dim)
-    if os.path.exists("models/actor_latest.pth"):
-        actor.load_state_dict(torch.load("models/actor_latest.pth"))
+    model_path = "models/actor_latest.pth"
+    loaded = try_load_actor_checkpoint(actor, model_path, map_location="cpu")
+    if loaded:
         actor.eval()
         print("Loaded trained model")
-    else:
+    elif not os.path.isfile(model_path):
         print("No trained model, using random actions")
+    else:
+        actor.eval()
+        print("Checkpoint incompatible with env; using random policy")
     
     obs = env.reset()
     for step in range(500):
         actions = {}
         for agent, ob in obs.items():
-            if os.path.exists("models/actor_latest.pth"):
+            if loaded:
                 with torch.no_grad():
                     obs_t = torch.FloatTensor(ob).unsqueeze(0)
                     mean, _ = actor(obs_t)

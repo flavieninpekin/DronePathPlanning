@@ -167,7 +167,8 @@ class MultiDroneEnv(gym.Env):
         return obs_dict
     
     def step(self, actions: Dict[str, np.ndarray]):
-        action_matrix = np.array([actions[agent] for agent in self.agents])
+        action_matrix = np.array([actions[agent] for agent in self.agents], dtype=np.float32)
+        action_matrix = np.clip(action_matrix, -self.max_speed, self.max_speed)
         new_positions = self.drone_positions + action_matrix * self.dt
         new_positions = np.clip(new_positions, 0, self.map_size[0])
         self.drone_velocities = action_matrix
@@ -194,6 +195,11 @@ class MultiDroneEnv(gym.Env):
                 dist_to_wp = np.linalg.norm(self.drone_positions[i] - np.array(self.waypoints[wp_idx]))
                 if dist_to_wp < self.goal_tolerance:
                     self.waypoint_indices[i] = wp_idx + 1
+            elif wp_idx == len(self.waypoints) - 1:
+                # 最后一个航点到达后，将索引推进到 len(waypoints)，触发终点奖励与完成判定
+                dist_to_wp = np.linalg.norm(self.drone_positions[i] - np.array(self.waypoints[wp_idx]))
+                if dist_to_wp < self.goal_tolerance:
+                    self.waypoint_indices[i] = len(self.waypoints)
             # 更新当前距离
             if self.waypoint_indices[i] < len(self.waypoints):
                 self.prev_dist_to_target[i] = np.linalg.norm(self.drone_positions[i] - np.array(self.waypoints[self.waypoint_indices[i]]))
@@ -229,14 +235,16 @@ class MultiDroneEnv(gym.Env):
             
             reward = 0.0
             
-            # 1. 路径跟踪奖励：距离减少量（势能奖励）
+            # 1. 路径跟踪奖励：距离减少量（势能奖励），但要限制范围
             if self.waypoint_indices[i] < len(self.waypoints):
                 current_dist = self.prev_dist_to_target[i]
                 prev_dist = old_dist_to_target[i]
-                # 距离减少则给正奖励，增加则给负奖励
-                delta_dist = prev_dist - current_dist
-                reward += delta_dist * self.w_track * 2.0   # 放大系数
-                # 额外：如果到达新航点，给额外奖励
+                # 只有航点索引未变时，才计算距离变化
+                if self.waypoint_indices[i] == old_waypoint_indices[i]:
+                    delta_dist = prev_dist - current_dist
+                    delta_dist = np.clip(delta_dist, -2.0, 2.0)   # 限制单步变化最大2米
+                    reward += delta_dist * self.w_track * 2.0
+                # 如果到达新航点，直接给固定正奖励（你已经有了+5）
                 if self.waypoint_indices[i] > old_waypoint_indices[i]:
                     reward += 5.0
             

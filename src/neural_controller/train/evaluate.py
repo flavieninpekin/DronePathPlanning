@@ -4,7 +4,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from env.drone_env import MultiDroneEnv
-from actor_critic import Actor
+from actor_critic import Actor, try_load_actor_checkpoint
 
 def evaluate(actor_path, num_episodes=10):
     config = {
@@ -21,7 +21,8 @@ def evaluate(actor_path, num_episodes=10):
     }
     env = MultiDroneEnv(config)
     actor = Actor(env.obs_dim, env.action_dim)
-    actor.load_state_dict(torch.load(actor_path))
+    if not try_load_actor_checkpoint(actor, actor_path, map_location="cpu"):
+        raise SystemExit(f"Cannot load actor weights from {actor_path}")
     actor.eval()
     
     success_count = 0
