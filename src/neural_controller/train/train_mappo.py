@@ -3,6 +3,7 @@ import torch.optim as optim
 import numpy as np
 import os
 import sys
+import time
 from contextlib import nullcontext
 from tensorboardX import SummaryWriter
 
@@ -86,6 +87,10 @@ class MAPPO:
         buffer = {
             'obs': [], 'actions': [], 'log_probs': [], 'rewards': [], 'dones': []
         }
+        episode_count = 0
+        episode_inactive_end_count = 0
+        episode_lengths = []
+        current_ep_len = 0
         obs = env.reset()
         for _ in range(steps):
             actions, log_probs = self.get_actions(obs)
@@ -100,12 +105,25 @@ class MAPPO:
             buffer['log_probs'].append(log_prob_list)
             buffer['rewards'].append(reward_list)
             buffer['dones'].append(done_list)
+            current_ep_len += 1
             obs = next_obs
             if dones["__all__"]:
+                episode_count += 1
+                episode_lengths.append(current_ep_len)
+                current_ep_len = 0
+                if any(done_list):
+                    episode_inactive_end_count += 1
                 obs = env.reset()
         for key in buffer:
             buffer[key] = np.array(buffer[key]).tolist()
-        return buffer
+        if current_ep_len > 0:
+            episode_lengths.append(current_ep_len)
+        stats = {
+            "episodes": episode_count,
+            "inactive_end_episodes": episode_inactive_end_count,
+            "mean_ep_len": float(np.mean(episode_lengths)) if episode_lengths else float(steps),
+        }
+        return buffer, stats
     
     def update(self, buffer):
         arr = lambda k: np.ascontiguousarray(np.array(buffer[k], dtype=np.float32))
@@ -184,20 +202,24 @@ class MAPPO:
                     self.critic_optimizer.step()
 
 def main():
-    config = {
+    base_config = {
         'num_drones': 2,
         'max_steps': 450,
         'dt': 0.1,
         'max_speed': 1.2,
         'collision_radius': 0.25,
         'num_dynamic_obs': 2,
+        'dynamic_obs_speed': 0.0,
         'w_track': 1.0,
         'w_formation': 0.05,
-        'w_collision': 1.0,
+        'w_collision': 0.0,
         'map_size': (30.0, 30.0),
     }
-    env = MultiDroneEnv(config)
-    agent = MAPPO(env, lr=1e-4)
+    target_dynamic_obs_speed = 1.0
+    target_w_collision = 1.0
+    warmup_episodes = 300
+    env = MultiDroneEnv(base_config)
+    agent = MAPPO(env, lr=1e-4, num_mini_batch=2)
     writer = SummaryWriter("runs/mappo")
     
     # 创建 models 文件夹（相对于项目根目录，即 src 的上一级）
@@ -210,10 +232,35 @@ def main():
             print("No existing model, starting from scratch")
     
     num_episodes = 2000
-    steps_per_update = 512
+    steps_per_update = 2048
     for ep in range(num_episodes):
-        buffer = agent.collect_experience(env, steps_per_update)
+        if ep == warmup_episodes:
+            env.dynamic_obs_speed = target_dynamic_obs_speed
+            env.w_collision = target_w_collision
+            print(
+                f"[Curriculum] Dynamic obstacles speed={target_dynamic_obs_speed}, "
+                f"w_collision={target_w_collision}"
+            )
+
+        t_collect_start = time.perf_counter()
+        buffer, rollout_stats = agent.collect_experience(env, steps_per_update)
+        collect_time = time.perf_counter() - t_collect_start
+
+        t_update_start = time.perf_counter()
         agent.update(buffer)
+        update_time = time.perf_counter() - t_update_start
+        inactive_end_rate = rollout_stats["inactive_end_episodes"] / max(1, rollout_stats["episodes"])
+
+        writer.add_scalar("train/collect_time_s", collect_time, ep)
+        writer.add_scalar("train/update_time_s", update_time, ep)
+        writer.add_scalar("train/inactive_end_rate", inactive_end_rate, ep)
+        writer.add_scalar("train/mean_episode_length", rollout_stats["mean_ep_len"], ep)
+
+        if ep % 10 == 0:
+            print(
+                f"Episode {ep} | collect {collect_time:.2f}s | update {update_time:.2f}s | "
+                f"inactive_end_rate {inactive_end_rate:.2f} | mean_ep_len {rollout_stats['mean_ep_len']:.1f}"
+            )
         if ep % 50 == 0:
             total_reward = 0
             obs = env.reset()
