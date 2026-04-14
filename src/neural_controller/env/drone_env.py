@@ -23,6 +23,7 @@ class MultiDroneEnv(gym.Env):
         self.w_track = config.get('w_track', 1.0)
         self.w_formation = config.get('w_formation', 0.3)
         self.w_collision = config.get('w_collision', 2.0)
+        self.death_penalty = config.get('death_penalty', -35.0)
         
         self.map_size = config.get('map_size', (20.0, 20.0))
         
@@ -45,6 +46,9 @@ class MultiDroneEnv(gym.Env):
         self.drone_velocities = np.empty((0,2))
         self.drone_active = np.array([], dtype=bool)
         self.dynamic_obstacles = []  
+        self.collision_grace_steps = config.get("collision_grace_steps", 8)
+        self.min_spawn_dist_factor = config.get("min_spawn_dist_factor", 5.0)
+        self.min_obs_start_dist_factor = config.get("min_obs_start_dist_factor", 8.0)
               
     def _generate_smooth_path(self) -> List[Tuple[float, float]]:
         """生成一条从起点到终点的直线路径（保证非空）"""
@@ -90,20 +94,30 @@ class MultiDroneEnv(gym.Env):
         self.drone_positions = []
         # 避免初始碰撞：确保每架无人机之间距离至少 1.5 倍半径
         for i in range(self.num_drones):
-            while True:
-                offset = np.random.uniform(-0.3, 0.3, size=2)
+            min_sep = self.min_spawn_dist_factor * self.collision_radius
+            spawn_range = max(0.6, min_sep * 1.2)
+            placed = False
+            for _ in range(300):
+                offset = np.random.uniform(-spawn_range, spawn_range, size=2)
                 pos = np.array(start_point) + offset
                 pos = np.clip(pos, 0, self.map_size[0])
                 if i == 0:
+                    placed = True
                     break
                 # 检查与已有无人机的距离
                 collision = False
                 for j in range(i):
-                    if np.linalg.norm(pos - self.drone_positions[j]) < 1.5 * self.collision_radius:
+                    if np.linalg.norm(pos - self.drone_positions[j]) < min_sep:
                         collision = True
                         break
                 if not collision:
+                    placed = True
                     break
+            if not placed:
+                # 回退：按圆环分布强制给初始位置，避免死循环
+                angle = 2 * np.pi * i / max(1, self.num_drones)
+                pos = np.array(start_point) + min_sep * np.array([np.cos(angle), np.sin(angle)])
+                pos = np.clip(pos, 0, self.map_size[0])
             self.drone_positions.append(pos)
         self.drone_positions = np.array(self.drone_positions, dtype=np.float32)
         self.drone_velocities = np.zeros((self.num_drones, 2), dtype=np.float32)
@@ -121,7 +135,16 @@ class MultiDroneEnv(gym.Env):
         
         self.dynamic_obstacles = []
         for _ in range(self.num_dynamic_obs):
-            pos = np.random.uniform(0, self.map_size[0], size=2)
+            for _ in range(200):
+                pos = np.random.uniform(0, self.map_size[0], size=2)
+                near_start = np.linalg.norm(pos - np.array(start_point)) < self.min_obs_start_dist_factor * self.collision_radius
+                near_drone = False
+                for dpos in self.drone_positions:
+                    if np.linalg.norm(pos - dpos) < self.min_obs_start_dist_factor * self.collision_radius:
+                        near_drone = True
+                        break
+                if not near_start and not near_drone:
+                    break
             angle = np.random.uniform(0, 2*np.pi)
             vel = self.dynamic_obs_speed * np.array([np.cos(angle), np.sin(angle)])
             self.dynamic_obstacles.append({'pos': pos, 'vel': vel})
@@ -206,31 +229,38 @@ class MultiDroneEnv(gym.Env):
             else:
                 self.prev_dist_to_target[i] = 0.0
         
-        # 碰撞检测
+        prev_active = self.drone_active.copy()
+        # 碰撞检测（前若干步启用保护，避免 reset 后立刻全灭）
         collision_occurred = np.zeros(self.num_drones, dtype=bool)
-        for i in range(self.num_drones):
-            if not self.drone_active[i]:
-                continue
-            for j in range(i+1, self.num_drones):
-                if not self.drone_active[j]:
+        if self.current_step >= self.collision_grace_steps:
+            for i in range(self.num_drones):
+                if not self.drone_active[i]:
                     continue
-                if np.linalg.norm(self.drone_positions[i] - self.drone_positions[j]) < 2 * self.collision_radius:
-                    collision_occurred[i] = True
-                    collision_occurred[j] = True
-        for i in range(self.num_drones):
-            if not self.drone_active[i]:
-                continue
-            for obs in self.dynamic_obstacles:
-                if np.linalg.norm(self.drone_positions[i] - obs['pos']) < 2 * self.collision_radius:
-                    collision_occurred[i] = True
-                    break
+                for j in range(i+1, self.num_drones):
+                    if not self.drone_active[j]:
+                        continue
+                    if np.linalg.norm(self.drone_positions[i] - self.drone_positions[j]) < 2 * self.collision_radius:
+                        collision_occurred[i] = True
+                        collision_occurred[j] = True
+            for i in range(self.num_drones):
+                if not self.drone_active[i]:
+                    continue
+                for obs in self.dynamic_obstacles:
+                    if np.linalg.norm(self.drone_positions[i] - obs['pos']) < 2 * self.collision_radius:
+                        collision_occurred[i] = True
+                        break
         self.drone_active = np.logical_and(self.drone_active, ~collision_occurred)
+        newly_inactive_collision = np.logical_and(prev_active, collision_occurred)
         
         # 计算奖励
         rewards = {}
         for i, agent in enumerate(self.agents):
             if not self.drone_active[i]:
-                rewards[agent] = -10.0
+                # 一次性死亡惩罚，避免失活后每步持续扣分掩盖其他智能体表现
+                if newly_inactive_collision[i]:
+                    rewards[agent] = self.death_penalty
+                else:
+                    rewards[agent] = 0.0
                 continue
             
             reward = 0.0

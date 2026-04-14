@@ -1,1 +1,1 @@
-# simulation package
+"""Simulation package."""

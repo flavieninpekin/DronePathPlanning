@@ -4,6 +4,7 @@ import numpy as np
 import os
 import sys
 import time
+import random
 from contextlib import nullcontext
 from tensorboardX import SummaryWriter
 
@@ -148,13 +149,19 @@ class MAPPO:
         with torch.no_grad():
             with _amp_autocast(self._use_amp):
                 values_flat = self.critic(global_states_flat).squeeze(-1)
-            returns = torch.zeros_like(rewards_buf)
-            running_return = torch.zeros(self.num_agents, device=self.device)
+            values = values_flat.view(obs_buf.shape[0], self.num_agents)
+            advantages = torch.zeros_like(rewards_buf)
+            gae = torch.zeros(self.num_agents, device=self.device)
+            next_values = torch.zeros(self.num_agents, device=self.device)
             for t in reversed(range(obs_buf.shape[0])):
-                running_return = rewards_buf[t] + self.gamma * running_return * (1.0 - dones_buf[t])
-                returns[t] = running_return
+                non_terminal = 1.0 - dones_buf[t]
+                delta = rewards_buf[t] + self.gamma * next_values * non_terminal - values[t]
+                gae = delta + self.gamma * self.gae_lambda * non_terminal * gae
+                advantages[t] = gae
+                next_values = values[t]
+            returns = advantages + values
             returns_flat = returns.view(-1)
-            advantages_flat = returns_flat - values_flat
+            advantages_flat = advantages.view(-1)
             advantages_flat = (advantages_flat - advantages_flat.mean()) / (advantages_flat.std() + 1e-8)
         
         chunk = total_steps // self.num_mini_batch
@@ -201,6 +208,54 @@ class MAPPO:
                     self.actor_optimizer.step()
                     self.critic_optimizer.step()
 
+
+def evaluate_policy(agent, env, episodes=10, max_steps=200, seed_base=12345):
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    torch_state = torch.random.get_rng_state()
+    if torch.cuda.is_available():
+        cuda_states = torch.cuda.get_rng_state_all()
+    else:
+        cuda_states = None
+
+    returns = []
+    success_count = 0
+    instant_fail_count = 0
+    for i in range(episodes):
+        seed = seed_base + i
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        total_reward = 0.0
+        end_step = 0
+        obs = env.reset()
+        for step in range(max_steps):
+            actions, _ = agent.get_actions(obs, deterministic=True)
+            obs, rewards, dones, _ = env.step(actions)
+            total_reward += sum(rewards.values())
+            end_step = step
+            if dones["__all__"]:
+                break
+        if total_reward > 200.0:
+            success_count += 1
+        if end_step <= 1 and total_reward <= -19.0:
+            instant_fail_count += 1
+        returns.append(total_reward)
+
+    np.random.set_state(np_state)
+    random.setstate(py_state)
+    torch.random.set_rng_state(torch_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(cuda_states)
+
+    returns_arr = np.array(returns, dtype=np.float32)
+    success_rate = success_count / max(1, episodes)
+    instant_fail_rate = instant_fail_count / max(1, episodes)
+    return float(returns_arr.mean()), float(returns_arr.std()), success_rate, instant_fail_rate
+
 def main():
     base_config = {
         'num_drones': 2,
@@ -213,11 +268,19 @@ def main():
         'w_track': 1.0,
         'w_formation': 0.05,
         'w_collision': 0.0,
+        'death_penalty': -40.0,
+        'collision_grace_steps': 10,
+        'min_spawn_dist_factor': 6.0,
+        'min_obs_start_dist_factor': 10.0,
         'map_size': (30.0, 30.0),
     }
-    target_dynamic_obs_speed = 1.0
-    target_w_collision = 1.0
-    warmup_episodes = 300
+    curriculum_schedule = [
+        (0, 0.0, 0.0),
+        (400, 0.3, 0.2),
+        (1200, 0.6, 0.5),
+        (2400, 1.0, 1.0),
+    ]
+    schedule_idx = 0
     env = MultiDroneEnv(base_config)
     agent = MAPPO(env, lr=1e-4, num_mini_batch=2)
     writer = SummaryWriter("runs/mappo")
@@ -227,19 +290,25 @@ def main():
     os.makedirs(model_dir, exist_ok=True)
     # 在 agent = MAPPO(env, lr=3e-4) 之后
     model_path = os.path.join(model_dir, "actor_latest.pth")
+    best_actor_path = os.path.join(model_dir, "actor_best.pth")
+    best_critic_path = os.path.join(model_dir, "critic_best.pth")
     if not try_load_actor_checkpoint(agent.actor, model_path, map_location=agent.device):
         if not os.path.isfile(model_path):
             print("No existing model, starting from scratch")
     
-    num_episodes = 2000
+    num_episodes = 8000
     steps_per_update = 2048
+    eval_episodes = 10
+    best_eval_score = -float("inf")
     for ep in range(num_episodes):
-        if ep == warmup_episodes:
-            env.dynamic_obs_speed = target_dynamic_obs_speed
-            env.w_collision = target_w_collision
+        if schedule_idx + 1 < len(curriculum_schedule) and ep >= curriculum_schedule[schedule_idx + 1][0]:
+            schedule_idx += 1
+            _, speed, collision_weight = curriculum_schedule[schedule_idx]
+            env.dynamic_obs_speed = speed
+            env.w_collision = collision_weight
             print(
-                f"[Curriculum] Dynamic obstacles speed={target_dynamic_obs_speed}, "
-                f"w_collision={target_w_collision}"
+                f"[Curriculum] stage={schedule_idx + 1}/{len(curriculum_schedule)} "
+                f"dynamic_obs_speed={speed:.2f}, w_collision={collision_weight:.2f}"
             )
 
         t_collect_start = time.perf_counter()
@@ -262,18 +331,29 @@ def main():
                 f"inactive_end_rate {inactive_end_rate:.2f} | mean_ep_len {rollout_stats['mean_ep_len']:.1f}"
             )
         if ep % 50 == 0:
-            total_reward = 0
-            obs = env.reset()
-            for _ in range(200):
-                actions, _ = agent.get_actions(obs, deterministic=True)
-                obs, rewards, dones, _ = env.step(actions)
-                total_reward += sum(rewards.values())
-                if dones["__all__"]:
-                    break
-            writer.add_scalar("eval_reward", total_reward, ep)
-            print(f"Episode {ep}, Eval Reward: {total_reward:.2f}")
+            eval_mean, eval_std, eval_success_rate, eval_instant_fail_rate = evaluate_policy(
+                agent, env, episodes=eval_episodes, max_steps=200, seed_base=20260
+            )
+            writer.add_scalar("eval/reward_mean", eval_mean, ep)
+            writer.add_scalar("eval/reward_std", eval_std, ep)
+            writer.add_scalar("eval/success_rate", eval_success_rate, ep)
+            writer.add_scalar("eval/instant_fail_rate", eval_instant_fail_rate, ep)
+            print(
+                f"Episode {ep}, Eval mean/std: {eval_mean:.2f} / {eval_std:.2f} | "
+                f"success_rate {eval_success_rate:.2f} | instant_fail_rate {eval_instant_fail_rate:.2f}"
+            )
             # 保存模型到 models 文件夹
             torch.save(agent.actor.state_dict(), os.path.join(model_dir, "actor_latest.pth"))
+            score = eval_mean + 200.0 * eval_success_rate - 80.0 * eval_instant_fail_rate
+            if score > best_eval_score:
+                best_eval_score = score
+                torch.save(agent.actor.state_dict(), best_actor_path)
+                torch.save(agent.critic.state_dict(), best_critic_path)
+                print(
+                    f"New best checkpoint saved at episode {ep}: "
+                    f"mean={eval_mean:.2f}, success_rate={eval_success_rate:.2f}, "
+                    f"instant_fail_rate={eval_instant_fail_rate:.2f}"
+                )
     writer.close()
 
 if __name__ == "__main__":
