@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import random
+import logging
 from contextlib import nullcontext
 from tensorboardX import SummaryWriter
 
@@ -21,7 +22,28 @@ from env.drone_env import MultiDroneEnv
 # actor_critic 在同一目录下，直接导入
 from actor_critic import Actor, Critic, try_load_actor_checkpoint
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+
+
+def setup_logger():
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+    log_dir = os.path.join(project_root, "data", "log")
+    os.makedirs(log_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"train_mappo_{ts}.log")
+
+    logger = logging.getLogger("mappo_train")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(formatter)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    logger.propagate = False
+    return logger, log_path
 
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
@@ -257,6 +279,10 @@ def evaluate_policy(agent, env, episodes=10, max_steps=200, seed_base=12345):
     return float(returns_arr.mean()), float(returns_arr.std()), success_rate, instant_fail_rate
 
 def main():
+    logger, log_path = setup_logger()
+    logger.info("Using device: %s", device)
+    logger.info("Log file: %s", log_path)
+
     base_config = {
         'num_drones': 2,
         'max_steps': 450,
@@ -294,9 +320,11 @@ def main():
     best_critic_path = os.path.join(model_dir, "critic_best.pth")
     if not try_load_actor_checkpoint(agent.actor, model_path, map_location=agent.device):
         if not os.path.isfile(model_path):
-            print("No existing model, starting from scratch")
+            logger.info("No existing model, starting from scratch")
+    else:
+        logger.info("Loaded checkpoint: %s", model_path)
     
-    num_episodes = 8000
+    num_episodes = 1500
     steps_per_update = 2048
     eval_episodes = 10
     best_eval_score = -float("inf")
@@ -306,7 +334,7 @@ def main():
             _, speed, collision_weight = curriculum_schedule[schedule_idx]
             env.dynamic_obs_speed = speed
             env.w_collision = collision_weight
-            print(
+            logger.info(
                 f"[Curriculum] stage={schedule_idx + 1}/{len(curriculum_schedule)} "
                 f"dynamic_obs_speed={speed:.2f}, w_collision={collision_weight:.2f}"
             )
@@ -326,7 +354,7 @@ def main():
         writer.add_scalar("train/mean_episode_length", rollout_stats["mean_ep_len"], ep)
 
         if ep % 10 == 0:
-            print(
+            logger.info(
                 f"Episode {ep} | collect {collect_time:.2f}s | update {update_time:.2f}s | "
                 f"inactive_end_rate {inactive_end_rate:.2f} | mean_ep_len {rollout_stats['mean_ep_len']:.1f}"
             )
@@ -338,7 +366,7 @@ def main():
             writer.add_scalar("eval/reward_std", eval_std, ep)
             writer.add_scalar("eval/success_rate", eval_success_rate, ep)
             writer.add_scalar("eval/instant_fail_rate", eval_instant_fail_rate, ep)
-            print(
+            logger.info(
                 f"Episode {ep}, Eval mean/std: {eval_mean:.2f} / {eval_std:.2f} | "
                 f"success_rate {eval_success_rate:.2f} | instant_fail_rate {eval_instant_fail_rate:.2f}"
             )
@@ -349,12 +377,13 @@ def main():
                 best_eval_score = score
                 torch.save(agent.actor.state_dict(), best_actor_path)
                 torch.save(agent.critic.state_dict(), best_critic_path)
-                print(
+                logger.info(
                     f"New best checkpoint saved at episode {ep}: "
                     f"mean={eval_mean:.2f}, success_rate={eval_success_rate:.2f}, "
                     f"instant_fail_rate={eval_instant_fail_rate:.2f}"
                 )
     writer.close()
+    logger.info("Training finished. TensorBoard dir: runs/mappo")
 
 if __name__ == "__main__":
     main()
