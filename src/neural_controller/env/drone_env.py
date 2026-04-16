@@ -24,13 +24,20 @@ class MultiDroneEnv(gym.Env):
         self.w_formation = config.get('w_formation', 0.3)
         self.w_collision = config.get('w_collision', 2.0)
         self.death_penalty = config.get('death_penalty', -35.0)
+        self.collision_alert_radius_factor = config.get("collision_alert_radius_factor", 4.0)
+        self.obstacle_alert_coef = config.get("obstacle_alert_coef", 1.5)
+        self.stuck_max_steps = config.get("stuck_max_steps", 35)
+        self.stuck_progress_eps = config.get("stuck_progress_eps", 0.015)
+        self.stuck_speed_eps = config.get("stuck_speed_eps", 0.08)
+        self.stuck_penalty = config.get("stuck_penalty", -45.0)
         
         self.map_size = config.get('map_size', (20.0, 20.0))
         
         # 生成路径
         self.waypoints = self._generate_smooth_path()
         
-        self.obs_dim = 4 + 2 + 2*(self.num_drones-1) + 2*self.num_dynamic_obs
+        # 每个动态障碍增加相对位置(2) + 相对速度(2)
+        self.obs_dim = 4 + 2 + 2*(self.num_drones-1) + 4*self.num_dynamic_obs
         self.action_dim = 2
         
         self.action_space = spaces.Box(low=-self.max_speed, high=self.max_speed, shape=(self.action_dim,))
@@ -49,6 +56,7 @@ class MultiDroneEnv(gym.Env):
         self.collision_grace_steps = config.get("collision_grace_steps", 8)
         self.min_spawn_dist_factor = config.get("min_spawn_dist_factor", 5.0)
         self.min_obs_start_dist_factor = config.get("min_obs_start_dist_factor", 8.0)
+        self.stuck_counters = np.array([], dtype=np.int32)
               
     def _generate_smooth_path(self) -> List[Tuple[float, float]]:
         """生成一条从起点到终点的直线路径（保证非空）"""
@@ -122,6 +130,7 @@ class MultiDroneEnv(gym.Env):
         self.drone_positions = np.array(self.drone_positions, dtype=np.float32)
         self.drone_velocities = np.zeros((self.num_drones, 2), dtype=np.float32)
         self.drone_active = np.ones(self.num_drones, dtype=bool)
+        self.stuck_counters = np.zeros(self.num_drones, dtype=np.int32)
         self.waypoint_indices = np.ones(self.num_drones, dtype=int)
         # 记录每个无人机到当前航点的距离（用于计算接近奖励）
         self.prev_dist_to_target = []
@@ -181,8 +190,10 @@ class MultiDroneEnv(gym.Env):
             obs_rel_obs = []
             for ob in self.dynamic_obstacles:
                 rel = ob['pos'] - pos
+                rel_v = ob['vel'] - vel
                 obs_rel_obs.extend(rel)
-            max_obs = self.num_dynamic_obs * 2
+                obs_rel_obs.extend(rel_v)
+            max_obs = self.num_dynamic_obs * 4
             if len(obs_rel_obs) < max_obs:
                 obs_rel_obs.extend([0.0] * (max_obs - len(obs_rel_obs)))
             obs.extend(obs_rel_obs[:max_obs])
@@ -251,6 +262,7 @@ class MultiDroneEnv(gym.Env):
                         break
         self.drone_active = np.logical_and(self.drone_active, ~collision_occurred)
         newly_inactive_collision = np.logical_and(prev_active, collision_occurred)
+        newly_inactive_stuck = np.zeros(self.num_drones, dtype=bool)
         
         # 计算奖励
         rewards = {}
@@ -259,6 +271,8 @@ class MultiDroneEnv(gym.Env):
                 # 一次性死亡惩罚，避免失活后每步持续扣分掩盖其他智能体表现
                 if newly_inactive_collision[i]:
                     rewards[agent] = self.death_penalty
+                elif newly_inactive_stuck[i]:
+                    rewards[agent] = self.stuck_penalty
                 else:
                     rewards[agent] = 0.0
                 continue
@@ -274,9 +288,15 @@ class MultiDroneEnv(gym.Env):
                     delta_dist = prev_dist - current_dist
                     delta_dist = np.clip(delta_dist, -2.0, 2.0)   # 限制单步变化最大2米
                     reward += delta_dist * self.w_track * 2.0
+                    speed = float(np.linalg.norm(self.drone_velocities[i]))
+                    if delta_dist < self.stuck_progress_eps and speed < self.stuck_speed_eps:
+                        self.stuck_counters[i] += 1
+                    else:
+                        self.stuck_counters[i] = 0
                 # 如果到达新航点，直接给固定正奖励（你已经有了+5）
                 if self.waypoint_indices[i] > old_waypoint_indices[i]:
                     reward += 5.0
+                    self.stuck_counters[i] = 0
             
             # 2. 编队奖励：与其他无人机的平均距离与期望距离的偏差
             if self.num_drones > 1:
@@ -295,6 +315,7 @@ class MultiDroneEnv(gym.Env):
             
             # 3. 密集避障奖励：根据最小距离给予平滑惩罚
             min_dist = float('inf')
+            min_obs_dist = float('inf')
             for j in range(self.num_drones):
                 if j != i and self.drone_active[j]:
                     d = np.linalg.norm(self.drone_positions[i] - self.drone_positions[j])
@@ -302,15 +323,27 @@ class MultiDroneEnv(gym.Env):
             for obs in self.dynamic_obstacles:
                 d = np.linalg.norm(self.drone_positions[i] - obs['pos'])
                 min_dist = min(min_dist, d)
-            if min_dist < 2 * self.collision_radius:
-                # 距离越近惩罚越大，最大惩罚 -5
-                penalty = -self.w_collision * (1.0 - min_dist / (2 * self.collision_radius))
+                min_obs_dist = min(min_obs_dist, d)
+            alert_radius = self.collision_alert_radius_factor * self.collision_radius
+            if min_dist < alert_radius:
+                penalty = -self.w_collision * (1.0 - min_dist / alert_radius)
                 reward += penalty
+            if min_obs_dist < alert_radius:
+                # 动态障碍使用额外提前惩罚，鼓励提前避让而不是临撞规避
+                obs_penalty = -self.w_collision * self.obstacle_alert_coef * (1.0 - min_obs_dist / alert_radius)
+                reward += obs_penalty
             
             # 4. 到达终点奖励
             if self.waypoint_indices[i] >= len(self.waypoints):
                 reward += 20.0
                 self.drone_active[i] = False
+                self.stuck_counters[i] = 0
+
+            if self.stuck_counters[i] >= self.stuck_max_steps:
+                self.drone_active[i] = False
+                newly_inactive_stuck[i] = True
+                reward += self.stuck_penalty
+                self.stuck_counters[i] = 0
             
             rewards[agent] = reward
         

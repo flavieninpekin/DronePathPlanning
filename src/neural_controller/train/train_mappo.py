@@ -295,6 +295,12 @@ def main():
         'w_formation': 0.05,
         'w_collision': 0.0,
         'death_penalty': -40.0,
+        'collision_alert_radius_factor': 4.0,
+        'obstacle_alert_coef': 1.5,
+        'stuck_max_steps': 35,
+        'stuck_progress_eps': 0.015,
+        'stuck_speed_eps': 0.08,
+        'stuck_penalty': -45.0,
         'collision_grace_steps': 10,
         'min_spawn_dist_factor': 6.0,
         'min_obs_start_dist_factor': 10.0,
@@ -324,7 +330,7 @@ def main():
     else:
         logger.info("Loaded checkpoint: %s", model_path)
     
-    num_episodes = 1500
+    num_episodes = 3000
     steps_per_update = 2048
     eval_episodes = 10
     best_eval_score = -float("inf")

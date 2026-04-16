@@ -1,15 +1,14 @@
 import numpy as np
 
 from src.algorithms.Astar import astar
-from src.map_generator.MapGenerator import generate_map
+from src.map_generator.MapGenerator import generate_map_with_path
 from src.algo_combinations.astar_rrt import run_astar_rrt_pipeline
 
 
 def main():
     print('=== DronePathPlanning sample run ===')
-    grid = generate_map((20, 20), obstacle_density=0.12)
+    grid, path = generate_map_with_path((20, 20), obstacle_density=0.12)
     print(f'Generated grid shape: {grid.shape}')
-
     path = astar(grid, (0, 0), (19, 19))
     print('A* path length:', len(path) if path else 0)
 
