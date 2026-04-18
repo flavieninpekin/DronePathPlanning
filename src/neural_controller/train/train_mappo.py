@@ -8,17 +8,20 @@ import random
 import logging
 from contextlib import nullcontext
 from tensorboardX import SummaryWriter
+from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 
-from torch.cuda.amp import autocast, GradScaler
-
-# 添加 neural_controller 目录到 sys.path，使得可以导入 env 包
-current_dir = os.path.dirname(__file__)                     # .../neural_controller/train
-parent_dir = os.path.dirname(current_dir)                   # .../neural_controller
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)                          # 现在可以 import env.xxx
+# 路径修复
+current_file = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+src_path = os.path.join(project_root, "src")
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
 
 # 现在可以正确导入（env 是 neural_controller 下的子包）
-from env.drone_env import MultiDroneEnv
+from neural_controller.env.drone_env import MultiDroneEnv
 # actor_critic 在同一目录下，直接导入
 from actor_critic import Actor, Critic, try_load_actor_checkpoint
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,7 +56,7 @@ if torch.cuda.is_available():
 def _amp_autocast(enabled: bool):
     if not enabled:
         return nullcontext()
-    return autocast(enabled=True)
+    return autocast('cuda', enabled=True)
 
 
 class MAPPO:
@@ -74,7 +77,7 @@ class MAPPO:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
         self._use_amp = self.device.type == "cuda"
         if self._use_amp:
-            self.scaler = GradScaler()
+            self.scaler = GradScaler('cuda')
         else:
             self.scaler = None
 
@@ -285,7 +288,7 @@ def main():
 
     base_config = {
         'num_drones': 2,
-        'max_steps': 450,
+        'max_steps': 1000,
         'dt': 0.1,
         'max_speed': 1.2,
         'collision_radius': 0.25,
@@ -304,13 +307,17 @@ def main():
         'collision_grace_steps': 10,
         'min_spawn_dist_factor': 6.0,
         'min_obs_start_dist_factor': 10.0,
-        'map_size': (30.0, 30.0),
+        'map_size': (100, 100),
+        'use_jps_rrt': True,         # 启用 JPS-RRT 全局路径规划
+        'obstacle_density': 0.15,    # 障碍物密度（0~1），仅在未传入 grid 时使用
+        'local_grid_size': 5,
     }
     curriculum_schedule = [
-        (0, 0.0, 0.0),
-        (400, 0.3, 0.2),
-        (1200, 0.6, 0.5),
-        (2400, 1.0, 1.0),
+        (0,     0.0, 0.0),   # 阶段1
+        (800,   0.2, 0.1),   # 阶段2
+        (1600,  0.5, 0.4),   # 阶段3
+        (2500,  0.8, 0.7),   # 阶段4
+        (4000,  1.2, 1.0),   # 阶段5
     ]
     schedule_idx = 0
     env = MultiDroneEnv(base_config)
@@ -330,7 +337,7 @@ def main():
     else:
         logger.info("Loaded checkpoint: %s", model_path)
     
-    num_episodes = 3000
+    num_episodes = 15000
     steps_per_update = 2048
     eval_episodes = 10
     best_eval_score = -float("inf")
@@ -366,7 +373,7 @@ def main():
             )
         if ep % 50 == 0:
             eval_mean, eval_std, eval_success_rate, eval_instant_fail_rate = evaluate_policy(
-                agent, env, episodes=eval_episodes, max_steps=200, seed_base=20260
+                agent, env, episodes=eval_episodes, max_steps=1000, seed_base=20260
             )
             writer.add_scalar("eval/reward_mean", eval_mean, ep)
             writer.add_scalar("eval/reward_std", eval_std, ep)

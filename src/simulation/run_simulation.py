@@ -29,6 +29,25 @@ def build_env_config():
         "map_size": (30.0, 30.0),
     }
 
+def _draw_obstacles(grid: np.ndarray):
+    """在 PyBullet 中绘制栅格地图中的障碍物（灰色方块）"""
+    if grid is None:
+        return
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            if grid[i, j] == 1:
+                x = i + 0.5
+                y = j + 0.5
+                p.createMultiBody(
+                    baseMass=0.0,
+                    baseCollisionShapeIndex=p.createCollisionShape(
+                        p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.2]
+                    ),
+                    baseVisualShapeIndex=p.createVisualShape(
+                        p.GEOM_BOX, halfExtents=[0.5, 0.5, 0.2], rgbaColor=[0.5, 0.5, 0.5, 1.0]
+                    ),
+                    basePosition=[x, y, 0.2]
+                )
 
 def _draw_waypoints(waypoints):
     for i in range(len(waypoints) - 1):
@@ -78,6 +97,7 @@ def run_rollout(env, actor, loaded, steps=1000, episodes=3, real_time=True, gui=
         basePosition=[map_x / 2, map_y / 2, -0.01],
     )
     _draw_waypoints(env.waypoints)
+    _draw_obstacles(env.grid)
 
     drone_ids = [_make_sphere(env.collision_radius, [0.1, 0.4, 0.95, 1.0]) for _ in env.agents]
     obs_ids = [_make_sphere(env.collision_radius, [0.95, 0.2, 0.2, 0.9]) for _ in range(env.num_dynamic_obs)]

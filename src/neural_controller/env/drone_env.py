@@ -3,7 +3,7 @@ from gymnasium import spaces
 import numpy as np
 import math
 import random
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
 class MultiDroneEnv(gym.Env):
     def __init__(self, config: dict):
@@ -17,7 +17,7 @@ class MultiDroneEnv(gym.Env):
         self.collision_radius = config.get('collision_radius', 0.25)
         self.goal_tolerance = config.get('goal_tolerance', 0.5)
         
-        self.num_dynamic_obs = config.get('num_dynamic_obs', 0)  # 先设为0
+        self.num_dynamic_obs = config.get('num_dynamic_obs', 0)
         self.dynamic_obs_speed = config.get('dynamic_obs_speed', 1.0)
         
         self.w_track = config.get('w_track', 1.0)
@@ -33,11 +33,34 @@ class MultiDroneEnv(gym.Env):
         
         self.map_size = config.get('map_size', (20.0, 20.0))
         
-        # 生成路径
-        self.waypoints = self._generate_smooth_path()
+        # ========== 新增：地图与路径配置 ==========
+        self.use_jps_rrt = config.get('use_jps_rrt', False)
+        self.obstacle_density = config.get('obstacle_density', 0.1)
+        self.grid = config.get('grid', None)  # 外部传入的栅格地图（可选）
+        # 在 __init__ 中，增加局部栅格大小的配置
+        self.local_grid_size = config.get('local_grid_size', 5)  # 5x5 局部视野
+
+        # 计算观测维度时加上 local_grid_size * local_grid_size
+        self.obs_dim = (4 + 2 + 2*(self.num_drones-1) + 4*self.num_dynamic_obs 
+                + self.local_grid_size * self.local_grid_size)
         
-        # 每个动态障碍增加相对位置(2) + 相对速度(2)
-        self.obs_dim = 4 + 2 + 2*(self.num_drones-1) + 4*self.num_dynamic_obs
+        # 生成或加载栅格地图
+        if self.grid is None:
+            from map_generator import MapGenerator
+            self.grid = MapGenerator.generate_map_with_path(
+                size=tuple(int(s) for s in self.map_size) if isinstance(self.map_size, (list, tuple)) else (int(self.map_size),)*2,
+                obstacle_density=self.obstacle_density,
+                dim=2
+            )
+        else:
+            self.grid = np.asarray(self.grid, dtype=np.uint8)
+        
+        # 生成全局路径
+        if self.use_jps_rrt:
+            self.waypoints = self._generate_jps_rrt_path()
+        else:
+            self.waypoints = self._generate_smooth_path()
+
         self.action_dim = 2
         
         self.action_space = spaces.Box(low=-self.max_speed, high=self.max_speed, shape=(self.action_dim,))
@@ -46,8 +69,7 @@ class MultiDroneEnv(gym.Env):
         self.agents = [f"drone_{i}" for i in range(self.num_drones)]
         self.possible_agents = self.agents[:]
         
-        #self.waypoints = []                     # 明确为 list
-        self.waypoint_indices = np.array([], dtype=int)            # 或者 np.array([])
+        self.waypoint_indices = np.array([], dtype=int)
         self.prev_dist_to_target = []
         self.drone_positions = np.empty((0,2))
         self.drone_velocities = np.empty((0,2))
@@ -57,25 +79,82 @@ class MultiDroneEnv(gym.Env):
         self.min_spawn_dist_factor = config.get("min_spawn_dist_factor", 5.0)
         self.min_obs_start_dist_factor = config.get("min_obs_start_dist_factor", 8.0)
         self.stuck_counters = np.array([], dtype=np.int32)
-              
+    
+    # ========== 新增：JPS-RRT 路径生成 ==========
+    def _generate_jps_rrt_path(self) -> List[Tuple[float, float]]:
+        if self.grid is None:
+            return self._generate_smooth_path()
+
+        grid = self.grid
+        try:
+            from algo_combinations.jps_rrt import run_jps_rrt_pipeline
+        except ImportError:
+            import sys, os
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from algo_combinations.jps_rrt import run_jps_rrt_pipeline
+
+        start = (0, 0)
+        goal = (self.map_size[0] - 1, self.map_size[1] - 1)
+
+        # 确保起点/终点在原始栅格中是空闲的
+        if grid[int(start[0]), int(start[1])] == 1:
+            free_cells = np.argwhere(grid == 0)
+            if len(free_cells) > 0:
+                start = tuple(free_cells[0].tolist())
+        if grid[int(goal[0]), int(goal[1])] == 1:
+            free_cells = np.argwhere(grid == 0)
+            if len(free_cells) > 1:
+                goal = tuple(free_cells[-1].tolist())
+
+        path = run_jps_rrt_pipeline(
+            grid=grid,
+            size=grid.shape,
+            density=float(grid.mean()),
+            threshold=0.1,
+            ratio=2,
+            start=start,
+            goal=goal,
+            step_size=1.0,
+            goal_tolerance=0.5,
+            max_iter=5000,
+            bias_prob=0.9
+    )
+        
+        if path is None:
+            print("Warning: JPS-RRT failed to find a path. Falling back to straight line.")
+            return self._generate_smooth_path()
+        
+        # 路径插值，使航点更密集
+        interpolated = self._interpolate_path(path, step_dist=0.5)
+        print(f"JPS-RRT path generated with {len(interpolated)} waypoints.")
+        return interpolated
+    
+    def _is_in_obstacle(self, pos: np.ndarray) -> bool:
+        """检查连续坐标是否落在栅格障碍物内"""
+        if self.grid is None:
+            return False
+        x, y = pos
+        ix, iy = int(np.floor(x)), int(np.floor(y))
+        if 0 <= ix < self.grid.shape[0] and 0 <= iy < self.grid.shape[1]: # type: ignore
+            return bool(self.grid[ix, iy] == 1)
+        return True  # 超出边界视为障碍物
+    # ========================================
+    
     def _generate_smooth_path(self) -> List[Tuple[float, float]]:
         """生成一条从起点到终点的直线路径（保证非空）"""
         start = np.array([1.0, 1.0])
         goal = np.array([self.map_size[0] - 1.0, self.map_size[1] - 1.0])
     
-        # 直接生成20个直线路径点
         path = []
         for t in np.linspace(0, 1, 20):
             x = start[0] * (1 - t) + goal[0] * t
             y = start[1] * (1 - t) + goal[1] * t
             path.append((x, y))
     
-        # 确保路径非空（如果因为某种原因还是空，手动添加起点和终点）
         if len(path) == 0:
             path = [(1.0, 1.0), (self.map_size[0]-1.0, self.map_size[1]-1.0)]
     
-        # 可选：打印路径长度以确认
-        print(f"Generated path with {len(path)} waypoints")
+        print(f"Generated straight path with {len(path)} waypoints")
         return path
     
     def _interpolate_path(self, path, step_dist):
@@ -100,7 +179,6 @@ class MultiDroneEnv(gym.Env):
     def reset(self):
         start_point = self.waypoints[0]
         self.drone_positions = []
-        # 避免初始碰撞：确保每架无人机之间距离至少 1.5 倍半径
         for i in range(self.num_drones):
             min_sep = self.min_spawn_dist_factor * self.collision_radius
             spawn_range = max(0.6, min_sep * 1.2)
@@ -109,10 +187,12 @@ class MultiDroneEnv(gym.Env):
                 offset = np.random.uniform(-spawn_range, spawn_range, size=2)
                 pos = np.array(start_point) + offset
                 pos = np.clip(pos, 0, self.map_size[0])
+                # 检查是否在障碍物内
+                if self._is_in_obstacle(pos):
+                    continue
                 if i == 0:
                     placed = True
                     break
-                # 检查与已有无人机的距离
                 collision = False
                 for j in range(i):
                     if np.linalg.norm(pos - self.drone_positions[j]) < min_sep:
@@ -122,17 +202,20 @@ class MultiDroneEnv(gym.Env):
                     placed = True
                     break
             if not placed:
-                # 回退：按圆环分布强制给初始位置，避免死循环
                 angle = 2 * np.pi * i / max(1, self.num_drones)
                 pos = np.array(start_point) + min_sep * np.array([np.cos(angle), np.sin(angle)])
                 pos = np.clip(pos, 0, self.map_size[0])
+                # 再次检查障碍物，若仍在障碍物内则尝试微调
+                for _ in range(10):
+                    if not self._is_in_obstacle(pos):
+                        break
+                    pos = np.clip(pos + np.random.uniform(-0.5, 0.5, size=2), 0, self.map_size[0])
             self.drone_positions.append(pos)
         self.drone_positions = np.array(self.drone_positions, dtype=np.float32)
         self.drone_velocities = np.zeros((self.num_drones, 2), dtype=np.float32)
         self.drone_active = np.ones(self.num_drones, dtype=bool)
         self.stuck_counters = np.zeros(self.num_drones, dtype=np.int32)
         self.waypoint_indices = np.ones(self.num_drones, dtype=int)
-        # 记录每个无人机到当前航点的距离（用于计算接近奖励）
         self.prev_dist_to_target = []
         for i in range(self.num_drones):
             wp_idx = self.waypoint_indices[i]
@@ -152,6 +235,9 @@ class MultiDroneEnv(gym.Env):
                     if np.linalg.norm(pos - dpos) < self.min_obs_start_dist_factor * self.collision_radius:
                         near_drone = True
                         break
+                # 动态障碍物也不应生成在静态障碍物内
+                if self._is_in_obstacle(pos):
+                    continue
                 if not near_start and not near_drone:
                     break
             angle = np.random.uniform(0, 2*np.pi)
@@ -197,8 +283,28 @@ class MultiDroneEnv(gym.Env):
             if len(obs_rel_obs) < max_obs:
                 obs_rel_obs.extend([0.0] * (max_obs - len(obs_rel_obs)))
             obs.extend(obs_rel_obs[:max_obs])
+            # ========== 新增：局部栅格感知 ==========
+            local_grid = self._get_local_grid(self.drone_positions[i])
+            obs.extend(local_grid)
+        # ======================================
             obs_dict[agent] = np.array(obs, dtype=np.float32)
         return obs_dict
+    
+    def _get_local_grid(self, pos: np.ndarray) -> np.ndarray:
+        """提取以无人机为中心的 local_grid_size x local_grid_size 局部栅格，展平返回。"""
+        half = self.local_grid_size // 2
+        x, y = int(np.floor(pos[0])), int(np.floor(pos[1]))
+        local = np.zeros((self.local_grid_size, self.local_grid_size), dtype=np.float32)
+    
+        for i in range(self.local_grid_size):
+            for j in range(self.local_grid_size):
+                xi = x - half + i
+                yj = y - half + j
+                if 0 <= xi < self.grid.shape[0] and 0 <= yj < self.grid.shape[1]: # type: ignore
+                    local[i, j] = float(self.grid[xi, yj]) # type: ignore
+                else:
+                    local[i, j] = 1.0  # 边界外视为障碍物
+        return local.flatten()
     
     def step(self, actions: Dict[str, np.ndarray]):
         action_matrix = np.array([actions[agent] for agent in self.agents], dtype=np.float32)
@@ -230,7 +336,6 @@ class MultiDroneEnv(gym.Env):
                 if dist_to_wp < self.goal_tolerance:
                     self.waypoint_indices[i] = wp_idx + 1
             elif wp_idx == len(self.waypoints) - 1:
-                # 最后一个航点到达后，将索引推进到 len(waypoints)，触发终点奖励与完成判定
                 dist_to_wp = np.linalg.norm(self.drone_positions[i] - np.array(self.waypoints[wp_idx]))
                 if dist_to_wp < self.goal_tolerance:
                     self.waypoint_indices[i] = len(self.waypoints)
@@ -241,9 +346,10 @@ class MultiDroneEnv(gym.Env):
                 self.prev_dist_to_target[i] = 0.0
         
         prev_active = self.drone_active.copy()
-        # 碰撞检测（前若干步启用保护，避免 reset 后立刻全灭）
         collision_occurred = np.zeros(self.num_drones, dtype=bool)
+        
         if self.current_step >= self.collision_grace_steps:
+            # 无人机间碰撞
             for i in range(self.num_drones):
                 if not self.drone_active[i]:
                     continue
@@ -253,6 +359,7 @@ class MultiDroneEnv(gym.Env):
                     if np.linalg.norm(self.drone_positions[i] - self.drone_positions[j]) < 2 * self.collision_radius:
                         collision_occurred[i] = True
                         collision_occurred[j] = True
+            # 与动态障碍物碰撞
             for i in range(self.num_drones):
                 if not self.drone_active[i]:
                     continue
@@ -260,6 +367,14 @@ class MultiDroneEnv(gym.Env):
                     if np.linalg.norm(self.drone_positions[i] - obs['pos']) < 2 * self.collision_radius:
                         collision_occurred[i] = True
                         break
+            # ========== 新增：与静态障碍物碰撞检测 ==========
+            for i in range(self.num_drones):
+                if not self.drone_active[i]:
+                    continue
+                if self._is_in_obstacle(self.drone_positions[i]):
+                    collision_occurred[i] = True
+            # ============================================
+        
         self.drone_active = np.logical_and(self.drone_active, ~collision_occurred)
         newly_inactive_collision = np.logical_and(prev_active, collision_occurred)
         newly_inactive_stuck = np.zeros(self.num_drones, dtype=bool)
@@ -268,7 +383,6 @@ class MultiDroneEnv(gym.Env):
         rewards = {}
         for i, agent in enumerate(self.agents):
             if not self.drone_active[i]:
-                # 一次性死亡惩罚，避免失活后每步持续扣分掩盖其他智能体表现
                 if newly_inactive_collision[i]:
                     rewards[agent] = self.death_penalty
                 elif newly_inactive_stuck[i]:
@@ -279,26 +393,24 @@ class MultiDroneEnv(gym.Env):
             
             reward = 0.0
             
-            # 1. 路径跟踪奖励：距离减少量（势能奖励），但要限制范围
+            # 1. 路径跟踪奖励
             if self.waypoint_indices[i] < len(self.waypoints):
                 current_dist = self.prev_dist_to_target[i]
                 prev_dist = old_dist_to_target[i]
-                # 只有航点索引未变时，才计算距离变化
                 if self.waypoint_indices[i] == old_waypoint_indices[i]:
                     delta_dist = prev_dist - current_dist
-                    delta_dist = np.clip(delta_dist, -2.0, 2.0)   # 限制单步变化最大2米
+                    delta_dist = np.clip(delta_dist, -2.0, 2.0)
                     reward += delta_dist * self.w_track * 2.0
                     speed = float(np.linalg.norm(self.drone_velocities[i]))
                     if delta_dist < self.stuck_progress_eps and speed < self.stuck_speed_eps:
                         self.stuck_counters[i] += 1
                     else:
                         self.stuck_counters[i] = 0
-                # 如果到达新航点，直接给固定正奖励（你已经有了+5）
                 if self.waypoint_indices[i] > old_waypoint_indices[i]:
                     reward += 5.0
                     self.stuck_counters[i] = 0
             
-            # 2. 编队奖励：与其他无人机的平均距离与期望距离的偏差
+            # 2. 编队奖励
             if self.num_drones > 1:
                 total_dist = 0.0
                 count = 0
@@ -309,11 +421,10 @@ class MultiDroneEnv(gym.Env):
                         count += 1
                 if count > 0:
                     mean_dist = total_dist / count
-                    # 期望距离为 1.0 到 1.5 之间
                     desired_dist = 1.2
                     reward -= abs(mean_dist - desired_dist) * self.w_formation
             
-            # 3. 密集避障奖励：根据最小距离给予平滑惩罚
+            # 3. 避障奖励
             min_dist = float('inf')
             min_obs_dist = float('inf')
             for j in range(self.num_drones):
@@ -329,7 +440,6 @@ class MultiDroneEnv(gym.Env):
                 penalty = -self.w_collision * (1.0 - min_dist / alert_radius)
                 reward += penalty
             if min_obs_dist < alert_radius:
-                # 动态障碍使用额外提前惩罚，鼓励提前避让而不是临撞规避
                 obs_penalty = -self.w_collision * self.obstacle_alert_coef * (1.0 - min_obs_dist / alert_radius)
                 reward += obs_penalty
             
