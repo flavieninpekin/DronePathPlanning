@@ -337,7 +337,7 @@ def main():
     else:
         logger.info("Loaded checkpoint: %s", model_path)
     
-    num_episodes = 15000
+    num_episodes = 4000
     steps_per_update = 2048
     eval_episodes = 10
     best_eval_score = -float("inf")

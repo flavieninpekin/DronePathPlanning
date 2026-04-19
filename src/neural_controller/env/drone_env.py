@@ -86,15 +86,31 @@ class MultiDroneEnv(gym.Env):
             return self._generate_smooth_path()
 
         grid = self.grid
+
+        # 寻找有效的起点和终点（原始分辨率下的空闲格子）
+        free_cells = np.argwhere(grid == 0)
+        if len(free_cells) == 0:
+            print("Warning: No free cells in grid, falling back to straight line.")
+            return self._generate_smooth_path()
+    
+        # 起点选择离 (0,0) 最近的空闲格子
+        start_coord = np.array([0, 0])
+        distances = np.linalg.norm(free_cells - start_coord, axis=1)
+        start = tuple(free_cells[np.argmin(distances)].tolist())
+    
+        # 终点选择离 (map_size[0]-1, map_size[1]-1) 最近的空闲格子
+        goal_coord = np.array([self.map_size[0] - 1, self.map_size[1] - 1])
+        distances = np.linalg.norm(free_cells - goal_coord, axis=1)
+        goal = tuple(free_cells[np.argmin(distances)].tolist())
+    
+        print(f"Adjusted start: {start}, goal: {goal}")
+
         try:
             from algo_combinations.jps_rrt import run_jps_rrt_pipeline
         except ImportError:
             import sys, os
             sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             from algo_combinations.jps_rrt import run_jps_rrt_pipeline
-
-        start = (0, 0)
-        goal = (self.map_size[0] - 1, self.map_size[1] - 1)
 
         # 确保起点/终点在原始栅格中是空闲的
         if grid[int(start[0]), int(start[1])] == 1:
@@ -110,8 +126,8 @@ class MultiDroneEnv(gym.Env):
             grid=grid,
             size=grid.shape,
             density=float(grid.mean()),
-            threshold=0.1,
-            ratio=2,
+            threshold=0.3,
+            ratio=4,
             start=start,
             goal=goal,
             step_size=1.0,

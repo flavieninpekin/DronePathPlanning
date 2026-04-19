@@ -1,9 +1,19 @@
 import argparse
 import os
 import time
-
+import sys
 import numpy as np
 import torch
+
+# 获取项目根目录 (DronePathPlanning/)
+current_file = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+src_path = os.path.join(project_root, "src")
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
 
 try:
     import pybullet as p
@@ -15,19 +25,24 @@ from neural_controller.train.actor_critic import Actor, try_load_actor_checkpoin
 
 
 def build_env_config():
+    """与训练配置保持一致"""
     return {
         "num_drones": 2,
-        "max_steps": 450,
+        "max_steps": 1000,                # 与训练一致
         "dt": 0.1,
-        "max_speed": 1.2,
+        "max_speed": 1.5,                 # 与训练一致
         "collision_radius": 0.25,
         "num_dynamic_obs": 2,
-        "dynamic_obs_speed": 1.0,
+        "dynamic_obs_speed": 1.0,         # 可根据需要调整
         "w_track": 1.0,
         "w_formation": 0.05,
         "w_collision": 1.0,
-        "map_size": (30.0, 30.0),
+        "map_size": (100.0, 100.0),       # 大地图
+        "use_jps_rrt": True,              # 启用 JPS-RRT
+        "obstacle_density": 0.15,
+        "local_grid_size": 5,             # 必须与训练一致
     }
+
 
 def _draw_obstacles(grid: np.ndarray):
     """在 PyBullet 中绘制栅格地图中的障碍物（灰色方块）"""
@@ -48,6 +63,7 @@ def _draw_obstacles(grid: np.ndarray):
                     ),
                     basePosition=[x, y, 0.2]
                 )
+
 
 def _draw_waypoints(waypoints):
     for i in range(len(waypoints) - 1):
@@ -97,7 +113,7 @@ def run_rollout(env, actor, loaded, steps=1000, episodes=3, real_time=True, gui=
         basePosition=[map_x / 2, map_y / 2, -0.01],
     )
     _draw_waypoints(env.waypoints)
-    _draw_obstacles(env.grid)
+    _draw_obstacles(env.grid)  # 绘制静态障碍物
 
     drone_ids = [_make_sphere(env.collision_radius, [0.1, 0.4, 0.95, 1.0]) for _ in env.agents]
     obs_ids = [_make_sphere(env.collision_radius, [0.95, 0.2, 0.2, 0.9]) for _ in range(env.num_dynamic_obs)]
