@@ -3,7 +3,7 @@ import random
 from collections import deque
 
 def generate_map_with_path(size, obstacle_density, start=None, goal=None, dim=2,
-                           step_factor=2.5, p=0.7, max_attempts=100):
+                           step_factor=2.5, p=0.7, max_attempts=100, channel_expansion=2):
     """
     先生成一条从起点到终点的蜿蜒路径（仅轴向移动），再随机填充障碍物。
     障碍物密度精确等于总格子数 * obstacle_density（除非路径占用了太多格子导致候选不足）。
@@ -94,6 +94,22 @@ def generate_map_with_path(size, obstacle_density, start=None, goal=None, dim=2,
     arr = np.zeros(size, dtype=np.uint8)
     path_set = set(path)  # 路径上的所有格子（去重）
 
+    # ========== 新增：通道膨胀 ==========
+    if channel_expansion > 0:
+        expanded_path_set = set(path_set)
+        for (x, y) in path_set:
+            for dx in range(-channel_expansion, channel_expansion + 1):
+                for dy in range(-channel_expansion, channel_expansion + 1):
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < size[0] and 0 <= ny < size[1]:
+                        expanded_path_set.add((nx, ny))
+        path_set = expanded_path_set
+    # =====================================
+
+    # 候选格子：不在（膨胀后的）路径上，且不是起点和终点
+    candidate_cells = [tuple(idx) for idx in np.ndindex(size)
+                       if idx not in path_set and idx != start and idx != goal]
+
     # 精确计算障碍物数量：总格子数 * 密度
     total_cells = np.prod(size)
     num_obstacles = int(total_cells * obstacle_density)
@@ -123,9 +139,9 @@ def generate_map_with_path(size, obstacle_density, start=None, goal=None, dim=2,
 class MapGenerator:
     @staticmethod
     def generate_map_with_path(size, obstacle_density, start=None, goal=None, dim=2,
-                               step_factor=2.5, p=0.7, max_attempts=100):
+                               step_factor=2.5, p=0.7, max_attempts=100, channel_expansion=2):
         return generate_map_with_path(size, obstacle_density, start=start, goal=goal, dim=dim,
-                                      step_factor=step_factor, p=p, max_attempts=max_attempts)
+                                      step_factor=step_factor, p=p, max_attempts=max_attempts, channel_expansion=channel_expansion)
 
 
 # 测试用例

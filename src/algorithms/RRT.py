@@ -2,11 +2,18 @@ import numpy as np
 import random
 from collections import deque
 
-def is_collision(grid, point):
-    idx = tuple(np.floor(point).astype(int))
-    if any(i < 0 or i >= s for i, s in zip(idx, grid.shape)):
-        return True
-    return grid[idx] == 1
+def is_collision(grid, point, radius=0.0):
+    """检查以 point 为中心、radius 为半径的圆是否与障碍物相交"""
+    x, y = point[0], point[1]
+    # 检查圆内所有整数坐标（简化：检查圆心所在格及周围8格）
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            nx = int(np.floor(x + dx * radius))
+            ny = int(np.floor(y + dy * radius))
+            if 0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1]:
+                if grid[nx, ny] == 1:
+                    return True
+    return False
 
 def get_nearest(tree, point):
     dists = [np.linalg.norm(np.array(n) - point) for n in tree]
@@ -41,11 +48,11 @@ def rrt_2d(grid, start, goal, step_size, max_iter=10000):
         nearest_idx = get_nearest(tree, rand_point)
         nearest_idx = int(nearest_idx)
         new_point = steer(tree[nearest_idx], rand_point, step_size)
-        if is_collision(grid, new_point):
+        if is_collision(grid, new_point, radius=0.0):
             continue
         tree.append(new_point)
         parents.append((new_point, int(nearest_idx)))
-        if np.linalg.norm(new_point - goal) < step_size and not is_collision(grid, goal):
+        if np.linalg.norm(new_point - goal) < step_size and not is_collision(grid, goal, radius=0.0):
             tree.append(goal)
             parents.append((goal, len(tree)-2))
             path = backtrace(parents, len(tree)-1)
@@ -65,11 +72,11 @@ def rrt_3d(grid, start, goal, step_size, max_iter=10000):
             rand_point = goal
         nearest_idx = get_nearest(tree, rand_point)
         new_point = steer(tree[nearest_idx], rand_point, step_size)
-        if is_collision(grid, new_point):
+        if is_collision(grid, new_point, radius=0.0):
             continue
         tree.append(new_point)
         parents.append((new_point, int(nearest_idx)))
-        if np.linalg.norm(new_point - goal) < step_size and not is_collision(grid, goal):
+        if np.linalg.norm(new_point - goal) < step_size and not is_collision(grid, goal, radius=0.0):
             tree.append(goal)
             parents.append((goal, len(tree)-2))
             path = backtrace(parents, len(tree)-1)

@@ -133,11 +133,11 @@ def _rrt_biased(
         nearest_idx = get_nearest(tree, rand_point)
         nearest_idx = int(nearest_idx)
         new_point = steer(tree[nearest_idx], rand_point, step_size)
-        if is_collision(grid, new_point):
+        if is_collision(grid, new_point, radius=0.0):
             continue
         tree.append(new_point)
         parents.append((new_point, nearest_idx))
-        if np.linalg.norm(new_point - goal_point) < goal_tolerance and not is_collision(grid, goal_point):
+        if np.linalg.norm(new_point - goal_point) < goal_tolerance and not is_collision(grid, goal_point, radius=0.0):
             tree.append(goal_point)
             parents.append((goal_point, len(tree) - 2))
             path = _backtrace(parents, len(tree) - 1)

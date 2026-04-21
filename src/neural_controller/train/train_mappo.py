@@ -311,6 +311,10 @@ def main():
         'use_jps_rrt': True,         # 启用 JPS-RRT 全局路径规划
         'obstacle_density': 0.15,    # 障碍物密度（0~1），仅在未传入 grid 时使用
         'local_grid_size': 5,
+        'map_generation_attempts': 10,
+        'use_map_pool': True,          # 启用地图池
+        'map_pool_size': 150,          # 池大小，可根据需要调整
+        'regenerate_map': False,       # 使用池时务必设为 False
     }
     curriculum_schedule = [
         (0,     0.0, 0.0),   # 阶段1
@@ -337,7 +341,7 @@ def main():
     else:
         logger.info("Loaded checkpoint: %s", model_path)
     
-    num_episodes = 4000
+    num_episodes = 15000
     steps_per_update = 2048
     eval_episodes = 10
     best_eval_score = -float("inf")

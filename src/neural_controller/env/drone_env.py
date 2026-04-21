@@ -4,6 +4,7 @@ import numpy as np
 import math
 import random
 from typing import List, Tuple, Dict, Optional
+from map_generator import MapGenerator
 
 class MultiDroneEnv(gym.Env):
     def __init__(self, config: dict):
@@ -33,34 +34,21 @@ class MultiDroneEnv(gym.Env):
         
         self.map_size = config.get('map_size', (20.0, 20.0))
         
-        # ========== 新增：地图与路径配置 ==========
+        # ========== 地图与路径配置 ==========
         self.use_jps_rrt = config.get('use_jps_rrt', False)
         self.obstacle_density = config.get('obstacle_density', 0.1)
-        self.grid = config.get('grid', None)  # 外部传入的栅格地图（可选）
-        # 在 __init__ 中，增加局部栅格大小的配置
-        self.local_grid_size = config.get('local_grid_size', 5)  # 5x5 局部视野
-
-        # 计算观测维度时加上 local_grid_size * local_grid_size
+        self.local_grid_size = config.get('local_grid_size', 5)
+        self.regenerate_map = config.get('regenerate_map', False)
+        self.map_generation_attempts = config.get('map_generation_attempts', 10)
+        
+        # 地图池配置
+        self.use_map_pool = config.get('use_map_pool', False)
+        self.map_pool_size = config.get('map_pool_size', 100)
+        self.map_pool = []  # 每个元素: {'grid': np.ndarray, 'waypoints': List[Tuple[float, float]]}
+        
+        # 计算观测维度
         self.obs_dim = (4 + 2 + 2*(self.num_drones-1) + 4*self.num_dynamic_obs 
-                + self.local_grid_size * self.local_grid_size)
-        
-        # 生成或加载栅格地图
-        if self.grid is None:
-            from map_generator import MapGenerator
-            self.grid = MapGenerator.generate_map_with_path(
-                size=tuple(int(s) for s in self.map_size) if isinstance(self.map_size, (list, tuple)) else (int(self.map_size),)*2,
-                obstacle_density=self.obstacle_density,
-                dim=2
-            )
-        else:
-            self.grid = np.asarray(self.grid, dtype=np.uint8)
-        
-        # 生成全局路径
-        if self.use_jps_rrt:
-            self.waypoints = self._generate_jps_rrt_path()
-        else:
-            self.waypoints = self._generate_smooth_path()
-
+                        + self.local_grid_size * self.local_grid_size)
         self.action_dim = 2
         
         self.action_space = spaces.Box(low=-self.max_speed, high=self.max_speed, shape=(self.action_dim,))
@@ -69,6 +57,16 @@ class MultiDroneEnv(gym.Env):
         self.agents = [f"drone_{i}" for i in range(self.num_drones)]
         self.possible_agents = self.agents[:]
         
+        # 初始化地图和路径
+        if self.use_map_pool:
+            self._build_map_pool()
+            # 从池中随机选一张作为初始地图
+            self._sample_from_pool()
+        else:
+            self.grid = config.get('grid', None)
+            self._initialize_single_map()
+        
+        # 其他状态变量
         self.waypoint_indices = np.array([], dtype=int)
         self.prev_dist_to_target = []
         self.drone_positions = np.empty((0,2))
@@ -79,49 +77,140 @@ class MultiDroneEnv(gym.Env):
         self.min_spawn_dist_factor = config.get("min_spawn_dist_factor", 5.0)
         self.min_obs_start_dist_factor = config.get("min_obs_start_dist_factor", 8.0)
         self.stuck_counters = np.array([], dtype=np.int32)
+
+    # ========== 地图池构建 ==========
+    def _build_map_pool(self):
+        """预生成地图池，只保留成功生成 JPS-RRT 路径的地图"""
+        print(f"Building map pool of size {self.map_pool_size} (valid JPS-RRT maps only)...")
+        
+        valid_count = 0
+        total_attempts = 0
+        max_total_attempts = self.map_pool_size * self.map_generation_attempts * 5
+        
+        while valid_count < self.map_pool_size and total_attempts < max_total_attempts:
+            total_attempts += 1
+            
+            try:
+                # 生成栅格地图
+                grid = MapGenerator.generate_map_with_path(
+                    size=tuple(int(s) for s in self.map_size) if isinstance(self.map_size, (list, tuple)) else (int(self.map_size),)*2,
+                    obstacle_density=self.obstacle_density,
+                    dim=2,
+                    channel_expansion=2
+                )
+                
+                # 尝试生成 JPS-RRT 路径（直接传 grid，不碰 self.grid）
+                if self.use_jps_rrt:
+                    waypoints = self._generate_jps_rrt_path(grid=grid)
+                    
+                    # 检查是否为有效路径（非回退直线）
+                    # 直线路径恰好 20 个点，JPS-RRT 路径通常远大于 20
+                    if len(waypoints) <= 20:
+                        print(f"  Attempt {total_attempts}: JPS-RRT failed (fallback straight line, {len(waypoints)} pts), discarding.")
+                        continue
+                else:
+                    waypoints = self._generate_smooth_path()
+                
+                # 成功：加入地图池
+                self.map_pool.append({'grid': grid, 'waypoints': waypoints})
+                valid_count += 1
+                
+                if valid_count % 10 == 0 or valid_count == self.map_pool_size:
+                    print(f"  Progress: {valid_count}/{self.map_pool_size} valid maps (attempted {total_attempts})")
+                    
+            except Exception as e:
+                print(f"  Attempt {total_attempts} error: {e}")
+                continue
+        
+        if valid_count < self.map_pool_size:
+            raise RuntimeError(
+                f"Could only generate {valid_count}/{self.map_pool_size} valid maps "
+                f"after {total_attempts} total attempts."
+            )
+        
+        print(f"Map pool built successfully with {len(self.map_pool)} valid maps.")
+
+    def _sample_from_pool(self):
+        """从地图池中随机选取一张地图和路径"""
+        selected = random.choice(self.map_pool)
+        self.grid = selected['grid']
+        self.waypoints = selected['waypoints']
+    
+    # ========== 单张地图初始化（非池模式） ==========
+    def _initialize_single_map(self):
+        """生成单张地图和路径（用于非池模式）"""
+        if self.grid is None:
+            from map_generator import MapGenerator
+            self.grid = MapGenerator.generate_map_with_path(
+                size=tuple(int(s) for s in self.map_size) if isinstance(self.map_size, (list, tuple)) else (int(self.map_size),)*2,
+                obstacle_density=self.obstacle_density,
+                dim=2,
+                channel_expansion=2
+            )
+        else:
+            self.grid = np.asarray(self.grid, dtype=np.uint8)
+        
+        if self.use_jps_rrt:
+            self.waypoints = self._generate_jps_rrt_path(grid=self.grid)
+        else:
+            self.waypoints = self._generate_smooth_path()
+    
+    def _initialize_map(self):
+        """生成新地图和路径，带重试机制"""
+        for attempt in range(self.map_generation_attempts):
+            try:
+                # 生成栅格地图
+                from map_generator import MapGenerator
+                self.grid = MapGenerator.generate_map_with_path(
+                    size=tuple(int(s) for s in self.map_size) if isinstance(self.map_size, (list, tuple)) else (int(self.map_size),)*2,
+                    obstacle_density=self.obstacle_density,
+                    dim=2,
+                    channel_expansion=2  # 新增：通道膨胀宽度
+                )
+                # 生成全局路径
+                if self.use_jps_rrt:
+                    self.waypoints = self._generate_jps_rrt_path()
+                else:
+                    self.waypoints = self._generate_smooth_path()
+                return  # 成功生成，退出
+            except Exception as e:
+                print(f"Map generation attempt {attempt+1} failed: {e}")
+        raise RuntimeError("Failed to generate a valid map after multiple attempts.")
     
     # ========== 新增：JPS-RRT 路径生成 ==========
-    def _generate_jps_rrt_path(self) -> List[Tuple[float, float]]:
-        if self.grid is None:
+    def _generate_jps_rrt_path(self, grid: Optional[np.ndarray] = None, silent: bool = False) -> List[Tuple[float, float]]:
+        """生成 JPS-RRT 路径，可接受外部传入的 grid，完全不依赖 self.grid"""
+        if grid is None:
+            grid = self.grid
+        if grid is None:
+            if not silent:
+                print("Warning: No grid provided, falling back to straight line.")
             return self._generate_smooth_path()
-
-        grid = self.grid
-
-        # 寻找有效的起点和终点（原始分辨率下的空闲格子）
+        
         free_cells = np.argwhere(grid == 0)
         if len(free_cells) == 0:
-            print("Warning: No free cells in grid, falling back to straight line.")
+            if not silent:
+                print("Warning: No free cells in grid, falling back to straight line.")
             return self._generate_smooth_path()
-    
-        # 起点选择离 (0,0) 最近的空闲格子
+        
         start_coord = np.array([0, 0])
         distances = np.linalg.norm(free_cells - start_coord, axis=1)
         start = tuple(free_cells[np.argmin(distances)].tolist())
-    
-        # 终点选择离 (map_size[0]-1, map_size[1]-1) 最近的空闲格子
+        
         goal_coord = np.array([self.map_size[0] - 1, self.map_size[1] - 1])
         distances = np.linalg.norm(free_cells - goal_coord, axis=1)
         goal = tuple(free_cells[np.argmin(distances)].tolist())
-    
-        print(f"Adjusted start: {start}, goal: {goal}")
-
+        
+        if not silent:
+            print(f"Adjusted start: {start}, goal: {goal}")
+        
         try:
             from algo_combinations.jps_rrt import run_jps_rrt_pipeline
         except ImportError:
             import sys, os
             sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             from algo_combinations.jps_rrt import run_jps_rrt_pipeline
-
-        # 确保起点/终点在原始栅格中是空闲的
-        if grid[int(start[0]), int(start[1])] == 1:
-            free_cells = np.argwhere(grid == 0)
-            if len(free_cells) > 0:
-                start = tuple(free_cells[0].tolist())
-        if grid[int(goal[0]), int(goal[1])] == 1:
-            free_cells = np.argwhere(grid == 0)
-            if len(free_cells) > 1:
-                goal = tuple(free_cells[-1].tolist())
-
+        
         path = run_jps_rrt_pipeline(
             grid=grid,
             size=grid.shape,
@@ -134,25 +223,30 @@ class MultiDroneEnv(gym.Env):
             goal_tolerance=0.5,
             max_iter=5000,
             bias_prob=0.9
-    )
+        )
         
         if path is None:
-            print("Warning: JPS-RRT failed to find a path. Falling back to straight line.")
+            if not silent:
+                print("Warning: JPS-RRT failed to find a path. Falling back to straight line.")
             return self._generate_smooth_path()
         
-        # 路径插值，使航点更密集
-        interpolated = self._interpolate_path(path, step_dist=0.5)
-        print(f"JPS-RRT path generated with {len(interpolated)} waypoints.")
+        # 插值时传入 grid，不访问 self.grid
+        interpolated = self._interpolate_path_safe(path, step_dist=0.5, grid=grid)
+        
+        if not silent:
+            print(f"JPS-RRT path generated with {len(interpolated)} waypoints.")
         return interpolated
     
-    def _is_in_obstacle(self, pos: np.ndarray) -> bool:
+    def _is_in_obstacle(self, pos: np.ndarray, grid: Optional[np.ndarray] = None) -> bool:
         """检查连续坐标是否落在栅格障碍物内"""
-        if self.grid is None:
-            return False
+        if grid is None:
+            grid = self.grid
+        if grid is None:
+            return False  # 如果连 self.grid 也没有，默认安全（但这种情况不应该发生）
         x, y = pos
         ix, iy = int(np.floor(x)), int(np.floor(y))
-        if 0 <= ix < self.grid.shape[0] and 0 <= iy < self.grid.shape[1]: # type: ignore
-            return bool(self.grid[ix, iy] == 1)
+        if 0 <= ix < grid.shape[0] and 0 <= iy < grid.shape[1]:
+            return bool(grid[ix, iy] == 1)
         return True  # 超出边界视为障碍物
     # ========================================
     
@@ -160,16 +254,13 @@ class MultiDroneEnv(gym.Env):
         """生成一条从起点到终点的直线路径（保证非空）"""
         start = np.array([1.0, 1.0])
         goal = np.array([self.map_size[0] - 1.0, self.map_size[1] - 1.0])
-    
         path = []
         for t in np.linspace(0, 1, 20):
             x = start[0] * (1 - t) + goal[0] * t
             y = start[1] * (1 - t) + goal[1] * t
             path.append((x, y))
-    
         if len(path) == 0:
             path = [(1.0, 1.0), (self.map_size[0]-1.0, self.map_size[1]-1.0)]
-    
         print(f"Generated straight path with {len(path)} waypoints")
         return path
     
@@ -192,7 +283,38 @@ class MultiDroneEnv(gym.Env):
                 new_path.append(path[i])
         return new_path
     
+    def _interpolate_path_safe(self, path, step_dist, grid=None):
+        """带碰撞检测的路径插值"""
+        if len(path) < 2:
+            return path
+        new_path = [path[0]]
+        for i in range(1, len(path)):
+            p1 = np.array(path[i-1])
+            p2 = np.array(path[i])
+            dist = np.linalg.norm(p2 - p1)
+            num = int(np.ceil(dist / step_dist))
+            for k in range(1, num + 1):
+                t = k / num
+                interp = p1 + t * (p2 - p1)
+                if not self._is_in_obstacle(interp, grid=grid):
+                    new_path.append(tuple(interp))
+                else:
+                    for _ in range(5):
+                        offset = np.random.uniform(-0.5, 0.5, size=2)
+                        cand = interp + offset
+                        if not self._is_in_obstacle(cand, grid=grid):
+                            new_path.append(tuple(cand))
+                            break
+        return new_path
+    
     def reset(self):
+        # 地图切换逻辑
+        if self.use_map_pool:
+            self._sample_from_pool()
+        elif self.regenerate_map:
+            self._initialize_single_map()
+        # 否则保持原有地图不变
+        
         start_point = self.waypoints[0]
         self.drone_positions = []
         for i in range(self.num_drones):
@@ -203,7 +325,6 @@ class MultiDroneEnv(gym.Env):
                 offset = np.random.uniform(-spawn_range, spawn_range, size=2)
                 pos = np.array(start_point) + offset
                 pos = np.clip(pos, 0, self.map_size[0])
-                # 检查是否在障碍物内
                 if self._is_in_obstacle(pos):
                     continue
                 if i == 0:
@@ -221,7 +342,6 @@ class MultiDroneEnv(gym.Env):
                 angle = 2 * np.pi * i / max(1, self.num_drones)
                 pos = np.array(start_point) + min_sep * np.array([np.cos(angle), np.sin(angle)])
                 pos = np.clip(pos, 0, self.map_size[0])
-                # 再次检查障碍物，若仍在障碍物内则尝试微调
                 for _ in range(10):
                     if not self._is_in_obstacle(pos):
                         break
@@ -251,7 +371,6 @@ class MultiDroneEnv(gym.Env):
                     if np.linalg.norm(pos - dpos) < self.min_obs_start_dist_factor * self.collision_radius:
                         near_drone = True
                         break
-                # 动态障碍物也不应生成在静态障碍物内
                 if self._is_in_obstacle(pos):
                     continue
                 if not near_start and not near_drone:
