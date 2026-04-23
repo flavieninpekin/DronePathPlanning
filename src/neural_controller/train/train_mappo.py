@@ -255,20 +255,20 @@ def evaluate_policy(agent, env, episodes=10, max_steps=200, seed_base=12345):
             torch.cuda.manual_seed_all(seed)
 
         total_reward = 0.0
-        end_step = 0
         obs = env.reset()
-        for step in range(max_steps):
+        episode_success = False
+        for _ in range(max_steps):
             actions, _ = agent.get_actions(obs, deterministic=True)
             obs, rewards, dones, _ = env.step(actions)
             total_reward += sum(rewards.values())
-            end_step = step
+            # 检查是否有无人机到达终点（最后一个航点）
+            if np.any(env.waypoint_indices >= len(env.waypoints)):
+                episode_success = True
             if dones["__all__"]:
                 break
-        if total_reward > 200.0:
-            success_count += 1
-        if end_step <= 1 and total_reward <= -19.0:
-            instant_fail_count += 1
         returns.append(total_reward)
+        if episode_success:
+            success_count += 1
 
     np.random.set_state(np_state)
     random.setstate(py_state)
@@ -286,11 +286,16 @@ def main():
     logger.info("Using device: %s", device)
     logger.info("Log file: %s", log_path)
 
+    # 确保数据和地图缓存目录存在
+    data_dir = os.path.join(project_root, "data")
+    map_cache_dir = os.path.join(data_dir, "map")
+    os.makedirs(map_cache_dir, exist_ok=True)
+
     base_config = {
-        'num_drones': 2,
-        'max_steps': 1000,
+        'num_drones': 6,
+        'max_steps': 2000,
         'dt': 0.1,
-        'max_speed': 1.2,
+        'max_speed': 2.0,
         'collision_radius': 0.25,
         'num_dynamic_obs': 2,
         'dynamic_obs_speed': 0.0,
@@ -315,17 +320,22 @@ def main():
         'use_map_pool': True,          # 启用地图池
         'map_pool_size': 150,          # 池大小，可根据需要调整
         'regenerate_map': False,       # 使用池时务必设为 False
+        'formation_sight_range': 4.0,    # 视觉范围
+        'w_formation_a': 0,
+        'w_formation_b': 0,
+        'w_collision': 0.5,              # 初始碰撞权重降低，由课程逐步增加
+        'map_pool_cache_path': os.path.abspath(os.path.join(project_root, "data", "map", "map_pool_150.pkl")),
     }
     curriculum_schedule = [
-        (0,     0.0, 0.0),   # 阶段1
-        (800,   0.2, 0.1),   # 阶段2
-        (1600,  0.5, 0.4),   # 阶段3
-        (2500,  0.8, 0.7),   # 阶段4
-        (4000,  1.2, 1.0),   # 阶段5
+        (0,     0.0, 0.0),    # Stage 1: 无动态障碍，仅学习沿路径飞行和集群保持
+        (5000,  0.0, 0.1),    # Stage 2: 引入静态障碍物贴近惩罚的碰撞权重
+        (9000,  0.3, 0.3),    # Stage 3: 动态障碍缓慢移动
+        (12000, 0.6, 0.6),    # Stage 4: 加速
+        (16000, 1.0, 1.0),    # Stage 5: 全速
     ]
     schedule_idx = 0
     env = MultiDroneEnv(base_config)
-    agent = MAPPO(env, lr=1e-4, num_mini_batch=2)
+    agent = MAPPO(env, lr=3e-5, gamma=0.99, gae_lambda=0.95, clip_param=0.2, ppo_epochs=10, num_mini_batch=2, value_loss_coef=0.5, entropy_coef=0.02)      # 降低学习率，使训练更稳定，增大熵系数，鼓励探索
     writer = SummaryWriter("runs/mappo")
     
     # 创建 models 文件夹（相对于项目根目录，即 src 的上一级）
@@ -341,7 +351,7 @@ def main():
     else:
         logger.info("Loaded checkpoint: %s", model_path)
     
-    num_episodes = 15000
+    num_episodes = 6000
     steps_per_update = 2048
     eval_episodes = 10
     best_eval_score = -float("inf")
