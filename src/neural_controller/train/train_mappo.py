@@ -323,7 +323,7 @@ def main():
         'formation_sight_range': 4.0,    # 视觉范围
         'w_formation_a': 0,
         'w_formation_b': 0,
-        'w_collision': 0.5,              # 初始碰撞权重降低，由课程逐步增加
+        'w_collision': 0,              # 初始碰撞权重降低，由课程逐步增加
         'map_pool_cache_path': os.path.abspath(os.path.join(project_root, "data", "map", "map_pool_150.pkl")),
     }
     curriculum_schedule = [
@@ -351,8 +351,8 @@ def main():
     else:
         logger.info("Loaded checkpoint: %s", model_path)
     
-    num_episodes = 6000
-    steps_per_update = 2048
+    num_episodes = 8000
+    steps_per_update = 4096
     eval_episodes = 10
     best_eval_score = -float("inf")
     for ep in range(num_episodes):

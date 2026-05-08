@@ -117,7 +117,7 @@ def run_single_test(algorithm_func, task_points, drone_positions, grid, **kwargs
 
 # ========== 主对比函数 ==========
 def compare_algorithms(num_tests=10, map_size=(30,30), obstacle_density=0.15,
-                       num_tasks=20, num_drones=5, random_seed=42):
+                       num_tasks=20, num_drones=5, random_seed=82):
     np.random.seed(random_seed)
     random.seed(random_seed)
 
@@ -219,5 +219,5 @@ if __name__ == "__main__":
         obstacle_density=0.15,   # 降低密度，提高连通性
         num_tasks=20,
         num_drones=5,
-        random_seed=42
+        random_seed=2
     )

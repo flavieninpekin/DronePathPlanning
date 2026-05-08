@@ -525,13 +525,13 @@ class MultiDroneEnv(gym.Env):
 
             reward = 0.0
 
-            # 1. 路径跟踪：稀疏奖励（到达新航点）
+            # 1. 到达新航点：极激进奖励
             if self.waypoint_indices[i] > old_waypoint_indices[i]:
-                wp_reward = 20.0 + 2.0 * self.waypoint_indices[i]  # 越往后奖励越高
+                wp_reward = 50.0 + 5.0 * self.waypoint_indices[i]  # 越往后越高
                 reward += wp_reward
                 self.stuck_counters[i] = 0
 
-            # 2. 沿路径前进的速度奖励
+            # 2. 沿路径前进的速度奖励（大幅提高）
             if self.waypoint_indices[i] < len(self.waypoints) - 1:
                 next_wp = np.array(self.waypoints[self.waypoint_indices[i] + 1])
                 curr_wp = np.array(self.waypoints[self.waypoint_indices[i]])
@@ -539,47 +539,19 @@ class MultiDroneEnv(gym.Env):
                 norm = np.linalg.norm(path_dir) + 1e-8
                 path_dir_norm = path_dir / norm
                 speed_along = np.dot(self.drone_velocities[i], path_dir_norm)
-                reward += 1.0 * max(0, speed_along)  # 只奖励正向速度
+                reward += 3.0 * max(0, speed_along)  # 系数提高到3.0
 
-            # 3. 终点到达奖励（大幅提高）
+            # 3. 终点奖励（保持）
             if self.waypoint_indices[i] >= len(self.waypoints):
                 reward += 500.0
                 self.drone_active[i] = False
                 self.stuck_counters[i] = 0
-                continue  # 到达终点后不再计算其他奖励
+                continue
 
-            # 4. 集群奖励（基于可见数量）
-            visible_count = 0
-            for j in range(self.num_drones):
-                if j == i or not self.drone_active[j]:
-                    continue
-                dist = np.linalg.norm(self.drone_positions[i] - self.drone_positions[j])
-                if dist < self.formation_sight_range:
-                    visible_count += 1
-            a = self.w_formation_a
-            b = self.w_formation_b
-            if self.num_drones > 1:
-                reward += -b + (a + b) * (visible_count / (self.num_drones - 1))
+            # 4. 暂时禁用静态障碍物惩罚、动态避障惩罚和集群奖励
+            # 只保留最纯粹的路径跟踪目标
 
-            # 5. 静态障碍物贴近惩罚
-            local_grid = self._get_local_grid(self.drone_positions[i])
-            obstacle_ratio = np.mean(local_grid)
-            reward -= 0.1 * obstacle_ratio
-
-            # 6. 动态避障惩罚（保持原有逻辑，但降低权重）
-            min_dist = float('inf')
-            for j in range(self.num_drones):
-                if j != i and self.drone_active[j]:
-                    d = np.linalg.norm(self.drone_positions[i] - self.drone_positions[j])
-                    min_dist = min(min_dist, d)
-            for obs in self.dynamic_obstacles:
-                d = np.linalg.norm(self.drone_positions[i] - obs['pos'])
-                min_dist = min(min_dist, d)
-            alert_radius = self.collision_alert_radius_factor * self.collision_radius
-            if min_dist < alert_radius:
-                reward += self.w_collision * (min_dist / alert_radius - 1.0)  # 连续惩罚
-
-            # 7. 卡死检测（保持原逻辑）
+            # 5. 卡死检测（保持）
             if self.stuck_counters[i] >= self.stuck_max_steps:
                 self.drone_active[i] = False
                 newly_inactive_stuck[i] = True

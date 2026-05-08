@@ -27,20 +27,26 @@ from neural_controller.train.actor_critic import Actor, try_load_actor_checkpoin
 def build_env_config():
     """与训练配置保持一致"""
     return {
-        "num_drones": 2,
-        "max_steps": 1000,                # 与训练一致
+        "num_drones": 6,                  # 与训练一致
+        "max_steps": 2000,
         "dt": 0.1,
-        "max_speed": 1.5,                 # 与训练一致
+        "max_speed": 2.0,                 # 与训练一致
         "collision_radius": 0.25,
         "num_dynamic_obs": 2,
-        "dynamic_obs_speed": 1.0,         # 可根据需要调整
+        "dynamic_obs_speed": 1.0,         # 评估时可设为1.0看最终效果
         "w_track": 1.0,
-        "w_formation": 0.05,
+        "w_formation": 0.0,
         "w_collision": 1.0,
-        "map_size": (100.0, 100.0),       # 大地图
-        "use_jps_rrt": True,              # 启用 JPS-RRT
+        "map_size": (100.0, 100.0),
+        "use_jps_rrt": True,
         "obstacle_density": 0.15,
-        "local_grid_size": 5,             # 必须与训练一致
+        "local_grid_size": 5,
+        "use_map_pool": True,             # 评估时也从池中采样
+        "map_pool_size": 5,
+        "regenerate_map": False,
+        "formation_sight_range": 4.0,
+        "w_formation_a": 0.0,
+        "w_formation_b": 0.0,
     }
 
 

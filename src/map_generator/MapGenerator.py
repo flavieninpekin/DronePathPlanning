@@ -3,7 +3,7 @@ import random
 from collections import deque
 
 def generate_map_with_path(size, obstacle_density, start=None, goal=None, dim=2,
-                           step_factor=2.5, p=0.7, max_attempts=100, channel_expansion=2):
+                           step_factor=2.5, p=0.7, max_attempts=100, channel_expansion=0):
     """
     先生成一条从起点到终点的蜿蜒路径（仅轴向移动），再随机填充障碍物。
     障碍物密度精确等于总格子数 * obstacle_density（除非路径占用了太多格子导致候选不足）。
