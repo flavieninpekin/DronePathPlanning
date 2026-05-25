@@ -8,9 +8,19 @@ import random
 import logging
 import multiprocessing as mp
 from contextlib import nullcontext
-from tensorboardX import SummaryWriter
-from torch.amp.autocast_mode import autocast
-from torch.amp.grad_scaler import GradScaler
+try:
+    from tensorboardX import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+try:
+    from torch.amp import autocast, GradScaler
+except ImportError:
+    try:
+        from torch.amp.autocast_mode import autocast
+        from torch.amp.grad_scaler import GradScaler
+    except ImportError:
+        autocast = None
+        GradScaler = None
 
 current_file = os.path.abspath(__file__)
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
@@ -53,7 +63,7 @@ if torch.cuda.is_available():
 
 
 def _amp_autocast(enabled: bool):
-    if not enabled:
+    if not enabled or autocast is None:
         return nullcontext()
     return autocast('cuda', enabled=True)
 
