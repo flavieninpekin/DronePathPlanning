@@ -42,6 +42,15 @@ jobs:
           set -eo pipefail
           echo "=== ${{ matrix.exp.desc }} ==="
           python -u src/neural_controller/train/${{ matrix.exp.script }} 2>&1 | tee ${{ matrix.exp.name }}_output.log
+      - name: Show log tail
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.exp.name }} output tail"
+            echo '```'
+            tail -200 ${{ matrix.exp.name }}_output.log 2>/dev/null || echo "No log file found"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
