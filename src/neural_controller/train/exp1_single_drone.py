@@ -223,9 +223,9 @@ class MAPPO_V8:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
         self._use_amp = self.device.type == "cuda"
         if self._use_amp:
-    self.scaler = GradScaler('cuda') if _NEW_AMP else GradScaler()
-else:
-    self.scaler = None
+            self.scaler = GradScaler('cuda') if _NEW_AMP else GradScaler()
+        else:
+            self.scaler = None
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_param = clip_param
