@@ -38,6 +38,7 @@ class MultiDroneEnvV2(MultiDroneEnv):
                     obs['pos'][dim] = np.clip(obs['pos'][dim], 0, self.map_size[0])
 
         old_waypoint_indices = self.waypoint_indices.copy()
+        old_dist_to_target = np.array(self.prev_dist_to_target, dtype=np.float32)
         self.prev_dist_to_target = self.prev_dist_to_target.copy()
 
         for i in range(self.num_drones):
@@ -116,20 +117,34 @@ class MultiDroneEnvV2(MultiDroneEnv):
                 reward += wp_reward
                 self.stuck_counters[i] = 0
 
-            # 3. Speed along path
-            next_wp = np.array(self.waypoints[self.waypoint_indices[i] + 1])
-            curr_wp = np.array(self.waypoints[self.waypoint_indices[i]])
-            path_dir = next_wp - curr_wp
-            norm = np.linalg.norm(path_dir) + 1e-8
-            path_dir_norm = path_dir / norm
-            speed_along = np.dot(self.drone_velocities[i], path_dir_norm)
-            reward += self.speed_reward_coef * max(0, speed_along)
+            # 3. Speed along path (fix OOB: last waypoint has no next)
+            if self.waypoint_indices[i] < len(self.waypoints) - 1:
+                next_wp = np.array(self.waypoints[self.waypoint_indices[i] + 1])
+                curr_wp = np.array(self.waypoints[self.waypoint_indices[i]])
+                path_dir = next_wp - curr_wp
+                norm = np.linalg.norm(path_dir) + 1e-8
+                path_dir_norm = path_dir / norm
+                speed_along = np.dot(self.drone_velocities[i], path_dir_norm)
+                reward += self.speed_reward_coef * max(0, speed_along)
 
-            # 4. Stuck detection
+            # 4. Stuck counter update (原版遗漏了自增逻辑)
+            if self.waypoint_indices[i] > old_waypoint_indices[i]:
+                self.stuck_counters[i] = 0
+            else:
+                curr_dist = self.prev_dist_to_target[i]
+                if curr_dist < old_dist_to_target[i] - self.stuck_progress_eps:
+                    self.stuck_counters[i] = 0
+                elif curr_dist > old_dist_to_target[i] + self.stuck_speed_eps:
+                    self.stuck_counters[i] += 2
+                else:
+                    self.stuck_counters[i] += 1
+
+            # 5. Stuck detection
             if self.stuck_counters[i] >= self.stuck_max_steps:
                 self.drone_active[i] = False
                 newly_inactive_stuck[i] = True
                 reward += self.stuck_penalty
+                rewards[agent] = reward
                 self.stuck_counters[i] = 0
                 continue
 

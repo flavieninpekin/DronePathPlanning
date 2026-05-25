@@ -173,6 +173,7 @@ def _patched_step(self, actions):
             self.drone_active[i] = False
             newly_inactive_stuck[i] = True
             reward += self.stuck_penalty
+            rewards[agent] = reward
             self.stuck_counters[i] = 0
             continue
 
@@ -549,6 +550,11 @@ def main():
         'wp_scale': 1.0,
         'speed_reward_coef': 3.0,
     }
+
+    min_steps_needed = int(path_len / (base_config['max_speed'] * base_config['dt']))
+    base_config['max_steps'] = max(base_config['max_steps'], int(min_steps_needed * 2.5))
+    logger.info("Adjusted max_steps=%d (path %.0f units, need ~%d steps)",
+                base_config['max_steps'], path_len, min_steps_needed)
 
     num_envs = int(os.environ.get("EXP_NUM_ENVS", "4"))
     steps_per_env = int(os.environ.get("EXP_STEPS_PER_ENV", "4096"))
