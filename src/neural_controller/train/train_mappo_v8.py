@@ -8,19 +8,19 @@ import random
 import logging
 import multiprocessing as mp
 from contextlib import nullcontext
+from tensorboardX import SummaryWriter
+
+# Cross-version PyTorch AMP compatibility
 try:
-    from tensorboardX import SummaryWriter
+    from torch.amp.autocast_mode import autocast
+    _NEW_AMP = True
 except ImportError:
-    SummaryWriter = None
+    from torch.cuda.amp import autocast
+    _NEW_AMP = False
 try:
-    from torch.amp import autocast, GradScaler
+    from torch.amp.grad_scaler import GradScaler
 except ImportError:
-    try:
-        from torch.amp.autocast_mode import autocast
-        from torch.amp.grad_scaler import GradScaler
-    except ImportError:
-        autocast = None
-        GradScaler = None
+    from torch.cuda.amp import GradScaler
 
 current_file = os.path.abspath(__file__)
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
@@ -63,9 +63,11 @@ if torch.cuda.is_available():
 
 
 def _amp_autocast(enabled: bool):
-    if not enabled or autocast is None:
+    if not enabled:
         return nullcontext()
-    return autocast('cuda', enabled=True)
+    if _NEW_AMP:
+        return autocast('cuda', enabled=True)
+    return autocast(enabled=True)
 
 
 def _env_worker_v8(env_config, conn, seed):
@@ -221,7 +223,10 @@ class MAPPO_V8:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
         self._use_amp = self.device.type == "cuda"
-        self.scaler = GradScaler('cuda') if self._use_amp else None
+        if self._use_amp:
+            self.scaler = GradScaler('cuda') if _NEW_AMP else GradScaler()
+        else:
+            self.scaler = None
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_param = clip_param

@@ -546,6 +546,7 @@ class MultiDroneEnv(gym.Env):
                 reward += 500.0
                 self.drone_active[i] = False
                 self.stuck_counters[i] = 0
+                rewards[agent] = reward
                 continue
 
             # 4. 暂时禁用静态障碍物惩罚、动态避障惩罚和集群奖励

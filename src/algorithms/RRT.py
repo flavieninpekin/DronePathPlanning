@@ -83,6 +83,111 @@ def rrt_3d(grid, start, goal, step_size, max_iter=10000):
             return np.array(path)
     return None
 
+# ==================== RRT* (RRT-Star) ====================
+def rrt_star_2d(grid, start, goal, step_size, max_iter=10000, goal_sample_rate=0.1, rewire_radius=None, tolerance=1.0):
+    """
+    RRT* 路径规划算法（带渐进最优性保证的RRT改进版）。
+
+    参数:
+        grid: 二维 0/1 numpy 数组，0=自由，1=障碍物
+        start, goal: 起点/终点坐标
+        step_size: 扩展步长
+        max_iter: 最大迭代次数
+        goal_sample_rate: 以目标为采样点的概率
+        rewire_radius: 重连半径，默认 step_size * 3
+        tolerance: 到达目标的容差
+
+    返回:
+        成功时返回路径数组 (Nx2)，失败返回 None
+    """
+    start = np.array(start, dtype=float)
+    goal = np.array(goal, dtype=float)
+    if rewire_radius is None:
+        rewire_radius = step_size * 3
+
+    tree = [start]
+    parents = [(start, -1)]
+    costs = [0.0]
+
+    def near_vertices(point, radius):
+        return [i for i, v in enumerate(tree) if np.linalg.norm(v - point) < radius]
+
+    best_path = None
+    best_cost = float('inf')
+
+    for i in range(max_iter):
+        if random.random() < goal_sample_rate:
+            rand_point = goal
+        else:
+            rand_point = np.array([random.uniform(0, grid.shape[0]),
+                                   random.uniform(0, grid.shape[1])])
+
+        nearest_idx = int(get_nearest(tree, rand_point))
+        new_point = steer(tree[nearest_idx], rand_point, step_size)
+        if is_collision(grid, new_point):
+            continue
+        if not edge_collision_free(grid, tree[nearest_idx], new_point):
+            continue
+
+        near_idxs = near_vertices(new_point, rewire_radius)
+        min_cost = costs[nearest_idx] + np.linalg.norm(new_point - tree[nearest_idx])
+        best_parent = nearest_idx
+        for ni in near_idxs:
+            if ni == nearest_idx:
+                continue
+            if not edge_collision_free(grid, tree[ni], new_point):
+                continue
+            candidate = costs[ni] + np.linalg.norm(new_point - tree[ni])
+            if candidate < min_cost:
+                min_cost = candidate
+                best_parent = ni
+
+        new_idx = len(tree)
+        tree.append(new_point)
+        parents.append((new_point, best_parent))
+        costs.append(costs[best_parent] + np.linalg.norm(new_point - tree[best_parent]))
+
+        for ni in near_idxs:
+            if ni == best_parent:
+                continue
+            if not edge_collision_free(grid, new_point, tree[ni]):
+                continue
+            new_cost = costs[new_idx] + np.linalg.norm(tree[ni] - new_point)
+            if new_cost < costs[ni]:
+                parents[ni] = (tree[ni], new_idx)
+                costs[ni] = new_cost
+                propagate_cost(tree, parents, costs, ni)
+
+        if np.linalg.norm(new_point - goal) < tolerance and not is_collision(grid, goal):
+            if edge_collision_free(grid, new_point, goal):
+                goal_idx = len(tree)
+                tree.append(goal)
+                parents.append((goal, new_idx))
+                costs.append(costs[new_idx] + np.linalg.norm(goal - new_point))
+                path_cost = costs[goal_idx]
+                if path_cost < best_cost:
+                    best_cost = path_cost
+                    best_path = backtrace(parents, goal_idx)
+
+    return np.array(best_path) if best_path is not None else None
+
+
+def edge_collision_free(grid, p1, p2, resolution=10):
+    p1 = np.array(p1, dtype=float)
+    p2 = np.array(p2, dtype=float)
+    for i in range(resolution + 1):
+        pt = p1 + (i / resolution) * (p2 - p1)
+        if is_collision(grid, pt):
+            return False
+    return True
+
+
+def propagate_cost(tree, parents, costs, start_idx):
+    for i in range(start_idx + 1, len(tree)):
+        if parents[i][1] == start_idx:
+            costs[i] = costs[start_idx] + np.linalg.norm(tree[i] - tree[start_idx])
+
+
 # 测试用例
 if __name__ == "__main__":
     # 2D 测试

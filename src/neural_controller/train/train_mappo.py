@@ -8,8 +8,18 @@ import random
 import logging
 from contextlib import nullcontext
 from tensorboardX import SummaryWriter
-from torch.amp.autocast_mode import autocast
-from torch.amp.grad_scaler import GradScaler
+
+# Cross-version PyTorch AMP compatibility
+try:
+    from torch.amp.autocast_mode import autocast
+    _NEW_AMP = True
+except ImportError:
+    from torch.cuda.amp import autocast
+    _NEW_AMP = False
+try:
+    from torch.amp.grad_scaler import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
 
 # 路径修复
 current_file = os.path.abspath(__file__)
@@ -56,7 +66,9 @@ if torch.cuda.is_available():
 def _amp_autocast(enabled: bool):
     if not enabled:
         return nullcontext()
-    return autocast('cuda', enabled=True)
+    if _NEW_AMP:
+        return autocast('cuda', enabled=True)
+    return autocast(enabled=True)
 
 
 class MAPPO:
@@ -77,7 +89,7 @@ class MAPPO:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
         self._use_amp = self.device.type == "cuda"
         if self._use_amp:
-            self.scaler = GradScaler('cuda')
+            self.scaler = GradScaler('cuda') if _NEW_AMP else GradScaler()
         else:
             self.scaler = None
 
