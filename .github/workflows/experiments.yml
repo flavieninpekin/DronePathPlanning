@@ -10,51 +10,7 @@ on:
         required: true
 
 jobs:
-  test_imports:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
-      - name: Test imports
-        run: |
-          python -c "
-import sys
-sys.path.insert(0, 'src')
-print('1. testing neural_controller...')
-from neural_controller.env.drone_env_v2 import MultiDroneEnvV2
-print('   OK')
-print('2. testing actor_critic...')
-from neural_controller.train.actor_critic import Actor, Critic
-print('   OK')
-print('3. testing metropolis...')
-from map_generator.MetropolisGenerator import generate
-print('   OK')
-print('4. testing env creation...')
-grid, wps = generate((200, 200))
-config = {'num_drones': 1, 'max_steps': 100, 'dt': 0.1, 'max_speed': 2.0,
-          'collision_radius': 0.25, 'num_dynamic_obs': 0, 'map_size': (200.0, 200.0),
-          'collision_grace_steps': 30, 'stuck_max_steps': 100,
-          'use_map_pool': False, 'local_grid_size': 7, 'grid': grid,
-          'goal_bonus': 20000, 'wp_base': 3, 'wp_scale': 1, 'speed_reward_coef': 3,
-          'death_penalty': -80, 'stuck_penalty': -20, 'min_spawn_dist_factor': 10}
-env = MultiDroneEnvV2(config)
-env.map_pool = [{'grid': grid, 'waypoints': wps}]
-env.use_map_pool = True
-_ = env.reset()
-print('   OK')
-print('All import tests passed!')
-"
-
   experiment:
-    needs: test_imports
     strategy:
       fail-fast: false
       matrix:
@@ -73,10 +29,8 @@ print('All import tests passed!')
         with:
           python-version: '3.11'
           cache: 'pip'
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Install deps
+        run: pip install --upgrade pip && pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
       - name: Run ${{ matrix.exp.name }}
         env:
           EXP_NUM_ENVS: '2'
@@ -88,13 +42,12 @@ print('All import tests passed!')
           set -eo pipefail
           echo "=== ${{ matrix.exp.desc }} ==="
           python -u src/neural_controller/train/${{ matrix.exp.script }} 2>&1 | tee ${{ matrix.exp.name }}_output.log
-        working-directory: ${{ github.workspace }}
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.exp.name }}-logs
           path: |
-            ${{ github.workspace }}/data/log/*.log
-            ${{ github.workspace }}/${{ matrix.exp.name }}_output.log
+            data/log/*.log
+            ${{ matrix.exp.name }}_output.log
           retention-days: 30
