@@ -1,0 +1,60 @@
+name: Experiments
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      episodes:
+        description: Number of training episodes per experiment
+        default: '500'
+        required: true
+
+jobs:
+  experiment:
+    strategy:
+      fail-fast: false
+      matrix:
+        exp:
+          - name: exp1_single_drone
+            desc: "1 drone (baseline)"
+            script: exp1_single_drone.py
+          - name: exp2_fix_rewards
+            desc: "1 drone + fix speed reward + fix stuck counter"
+            script: exp2_fix_rewards.py
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install numpy torch --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install tensorboardX gymnasium tqdm
+
+      - name: Run ${{ matrix.exp.name }}
+        env:
+          EXP_NUM_ENVS: '2'
+          EXP_STEPS_PER_ENV: '2048'
+          EXP_NUM_EPISODES: ${{ github.event.inputs.episodes || '500' }}
+          EXP_EVAL_EPISODES: '3'
+          OMP_NUM_THREADS: '2'
+        run: |
+          echo "=== ${{ matrix.exp.desc }} ==="
+          python src/neural_controller/train/${{ matrix.exp.script }} 2>&1 | tee ${{ matrix.exp.name }}_output.log
+        working-directory: ${{ github.workspace }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.exp.name }}-logs
+          path: |
+            ${{ github.workspace }}/data/log/*.log
+            ${{ github.workspace }}/${{ matrix.exp.name }}_output.log
+          retention-days: 30

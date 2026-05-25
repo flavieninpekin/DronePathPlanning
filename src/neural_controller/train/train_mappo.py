@@ -318,7 +318,7 @@ def main():
         'local_grid_size': 5,
         'map_generation_attempts': 10,
         'use_map_pool': True,          # 启用地图池
-        'map_pool_size': 150,          # 池大小，可根据需要调整
+        'map_pool_size': 125,          # 池大小，可根据需要调整
         'regenerate_map': False,       # 使用池时务必设为 False
         'formation_sight_range': 4.0,    # 视觉范围
         'w_formation_a': 0,

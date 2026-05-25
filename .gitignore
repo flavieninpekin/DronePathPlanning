@@ -1,2 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Models
+*.pth
+*.pkl
+src/models/
+
+# Logs & data
+*.log
 data/
-src/neural_controller/models
+log/
+
+# TensorBoard
+runs/
+
+# Experiments plots
+experiments/
+*.png
+*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
