@@ -21,6 +21,9 @@ jobs:
           - name: exp2_fix_rewards
             desc: "1 drone + fix speed reward + fix stuck counter"
             script: exp2_fix_rewards.py
+          - name: exp3_curriculum
+            desc: "1 drone + curriculum learning (density stages)"
+            script: exp3_curriculum.py
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:
